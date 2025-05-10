@@ -2,8 +2,9 @@ import torch
 import torch.nn.functional as F
 from torchvision import transforms
 from tqdm import tqdm
+from utils.dataloader import GeneratedDataset
 
-def preprocess_images(images, image_size=(512, 256), device='cuda'):
+def preprocess_images(image_size=(512, 256), device='cuda'):
     """
     Preprocess images to match the input requirements for the metric.
     Returns a list of tensors of shape (3, H, W).
@@ -13,10 +14,7 @@ def preprocess_images(images, image_size=(512, 256), device='cuda'):
         transforms.ToTensor()
     ])
 
-    processed_images = []
-    for img in tqdm(images, desc="Preprocessing (Discontinuity score)"):
-        processed_images.append(tf(img).to(device))
-    return processed_images
+    return tf
 
 
 def scharr_kernel():
@@ -68,15 +66,22 @@ def compute_discontinuity_score(gen_images, image_size=(512, 256), device='cuda'
     height = image_size[1]
     scale_factor = seam_width / height
 
-    image_tensors = preprocess_images(gen_images, image_size=image_size, device=device)
+    # image_tensors = preprocess_images(gen_images, image_size=image_size, device=device)
+    image_tensors = GeneratedDataset(gen_images, transform=preprocess_images())
+
+    dataloader = torch.utils.data.DataLoader(image_tensors, batch_size=1, shuffle=False, num_workers=4)
 
     scores = []
-    for img_tensor in image_tensors:
+    for img_tensor in tqdm(dataloader, desc="Computing Discontinuity Score", total=len(dataloader)):
+        img_tensor = img_tensor.to(device)
         seam = extract_seam_region(img_tensor, seam_width=seam_width)
+        # print(seam.shape)
+        seam = seam.squeeze(0)
         gray = 0.2989 * seam[0] + 0.5870 * seam[1] + 0.1140 * seam[2]  # grayscale
         gray = gray.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W=6*2)
 
         score = compute_ds_score(gray, kernel)
         scores.append(score * scale_factor)
 
+    print(f"Average Discontinuity Score: {sum(scores) / len(scores)}")
     return sum(scores) / len(scores)

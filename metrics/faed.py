@@ -1,10 +1,11 @@
 import torch
 from torchvision import transforms
-from panfusion_faed import FrechetAutoEncoderDistance
+from .panfusion_faed import FrechetAutoEncoderDistance
 from tqdm import tqdm
+from utils.dataloader import GeneratedDataset, RealDataset
 
 
-def preprocess_images(images, image_size=(512, 256), normalize=False):
+def preprocess_images(image_size=(256, 512), normalize=False):
     """
     Preprocess panorama images for FAED.
     Returns a tensor of shape (N, 3, H, W).
@@ -15,17 +16,14 @@ def preprocess_images(images, image_size=(512, 256), normalize=False):
         transforms.Lambda(lambda x: (x * 255).to(torch.uint8) if not normalize else x)
     ])
     
-    preprocessed_images = []
-    for img in tqdm(images, desc="Preprocessing (FAED)"):
-        preprocessed_images.append(tf(img))
-    return torch.stack(preprocessed_images)
+    return tf
 
 
 def compute_faed(
     real_images,
     gen_images,
     pano_height=256,
-    image_size=(512, 256),
+    image_size=(256, 512),
     device='cuda' if torch.cuda.is_available() else 'cpu'
 ):
     """
@@ -45,13 +43,21 @@ def compute_faed(
     metric = FrechetAutoEncoderDistance(pano_height=pano_height).to(device)
 
     # Preprocess images
-    real_imgs = preprocess_images(real_images, image_size=image_size).to(device)
-    gen_imgs = preprocess_images(gen_images, image_size=image_size).to(device)
+    # real_imgs = preprocess_images(real_images, image_size=image_size).to(device)
+    # gen_imgs = preprocess_images(gen_images, image_size=image_size).to(device)
 
-    # Update metric
-    metric.update(real_imgs, real=True)
-    metric.update(gen_imgs, real=False)
+    real_imgs = RealDataset(real_images, transform=preprocess_images())#.to(device)
+    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images())#.to(device)
+
+    real_dl = torch.utils.data.DataLoader(real_imgs, batch_size=32, shuffle=False, num_workers=4)
+    gen_dl = torch.utils.data.DataLoader(gen_imgs, batch_size=32, shuffle=False, num_workers=4)
+
+    for real_batch, gen_batch in tqdm(zip(real_dl, gen_dl), desc="Computing FAED", total=len(real_dl)):
+        # Update metric with batches
+        metric.update(real_batch.to(device), real=True)
+        metric.update(gen_batch.to(device), real=False)
 
     # Compute FAED
     faed_score = metric.compute().item()
+    print(f"FAED score: {faed_score}")
     return faed_score

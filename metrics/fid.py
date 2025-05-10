@@ -2,9 +2,10 @@ import torch
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchvision import transforms
 from tqdm import tqdm
+from utils.dataloader import GeneratedDataset, RealDataset
 
 
-def preprocess_images(images, image_size=(299, 299), normalize=False):
+def preprocess_images(image_size=(299, 299), normalize=False):
     """
     Preprocess images to match the input requirements for the metric.
     Returns a tensor of shape (N, 3, H, W).
@@ -21,10 +22,7 @@ def preprocess_images(images, image_size=(299, 299), normalize=False):
             transforms.Lambda(lambda x: (x * 255).to(torch.uint8))  # cast to uint8 in [0,255]
         ])
 
-    processed_images = []
-    for img in tqdm(images, desc="Preprocessing (FID)"):
-        processed_images.append(tf(img))
-    return torch.stack(processed_images)
+    return tf
 
 
 def compute_fid(real_images, gen_images, feature_dim=2048, normalize=False, dtype=torch.float64, device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -51,13 +49,18 @@ def compute_fid(real_images, gen_images, feature_dim=2048, normalize=False, dtyp
     fid_metric.set_dtype(dtype)
 
     # Load image tensors
-    real_imgs = preprocess_images(real_images, normalize=normalize).to(device)
-    gen_imgs = preprocess_images(gen_images, normalize=normalize).to(device)
+    real_imgs = RealDataset(real_images, transform=preprocess_images(normalize=normalize))#.to(device)
+    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images(normalize=normalize))#.to(device)
 
-    # Update metric state
-    fid_metric.update(real_imgs, real=True)
-    fid_metric.update(gen_imgs, real=False)
+    real_dl = torch.utils.data.DataLoader(real_imgs, batch_size=32, shuffle=False, num_workers=4)
+    gen_dl = torch.utils.data.DataLoader(gen_imgs, batch_size=32, shuffle=False, num_workers=4)
+
+    for real_batch, gen_batch in tqdm(zip(real_dl, gen_dl), desc="Computing FID", total=len(real_dl)):
+        # Update metric with batches
+        fid_metric.update(real_batch.to(device), real=True)
+        fid_metric.update(gen_batch.to(device), real=False)
 
     # Compute FID
     fid_value = fid_metric.compute().item()
+    print(f"FID: {fid_value}")
     return fid_value

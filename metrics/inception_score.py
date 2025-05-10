@@ -2,9 +2,10 @@ import torch
 from torchmetrics.image.inception import InceptionScore
 from torchvision import transforms
 from tqdm import tqdm
+from utils.dataloader import GeneratedDataset
 
 
-def preprocess_images(images, image_size=(299, 299), normalize=False):
+def preprocess_images(image_size=(299, 299), normalize=False):
     """
     Preprocess images to match the input requirements for the metric.
     Returns a tensor of shape (N, 3, H, W).
@@ -21,10 +22,7 @@ def preprocess_images(images, image_size=(299, 299), normalize=False):
             transforms.Lambda(lambda x: (x * 255).to(torch.uint8))  # uint8 [0,255]
         ])
 
-    processed_images = []
-    for img in tqdm(images, desc="Preprocessing (Inception score)"):
-        processed_images.append(tf(img))
-    return torch.stack(processed_images)
+    return tf
 
 
 def compute_inception_score(
@@ -54,12 +52,17 @@ def compute_inception_score(
         splits=splits,
         normalize=normalize
     ).to(device)
-    inception.set_dtype(dtype)
+    inception.set_dtype(torch.float32)
 
     # Preprocess images
-    gen_imgs = preprocess_images(gen_images, normalize=normalize).to(device)
+    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images(normalize=normalize))
+    gen_dl = torch.utils.data.DataLoader(gen_imgs, batch_size=32, shuffle=False, num_workers=4)
+    for gen_batch in tqdm(gen_dl, desc="Computing Inception Score", total=len(gen_dl)):
+        # Move batch to device
+        gen_batch = gen_batch.to(device).to(torch.uint8)
+        # Update metric with batches
+        inception.update(gen_batch)
 
-    # Update and compute
-    inception.update(gen_imgs)
     is_mean, is_std = inception.compute()
+    print(f"Inception Score: {is_mean:.4f} ± {is_std:.4f}")
     return is_mean.item(), is_std.item()

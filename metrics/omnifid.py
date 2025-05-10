@@ -1,11 +1,15 @@
 import torch
 from torchvision import transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
-import kornia.geometry as KG
+# import kornia.geometry as KG
+import py360convert
+import numpy as np
 from tqdm import tqdm
+from utils.dataloader import GeneratedDataset, RealDataset
+import time
 
 
-def preprocess_images(images, image_size=(512, 256), device='cuda'):
+def preprocess_images(image_size=(512, 256), device='cuda'):
     """
     Preprocess images to match the input requirements for the metric.
     Returns a tensor of shape (N, 3, H, W).
@@ -14,21 +18,33 @@ def preprocess_images(images, image_size=(512, 256), device='cuda'):
         transforms.Resize(image_size),
         transforms.ToTensor()
     ])
-    processed_images = []
-    for img in tqdm(images, desc="Preprocessing (OmniFID)"):
-        processed_images.append(tf(img))
-    return torch.stack(processed_images).to(device)
+    return tf
 
 
-def equirectangular_to_cubemap_batch(eqr_imgs, face_size=256):
+def equirectangular_to_cubemap_batch(eqr_imgs, face_size=256, max_workers=4):
     """
     Converts a batch of equirectangular images to cubemap format using Kornia.
     Returns: Tensor of shape (B, 6, 3, face_size, face_size)
     """
-    B, C, H, W = eqr_imgs.shape
-    # Convert to cubemap using Kornia
-    cube = KG.camera.warp.equirectangular_to_cube(eqr_imgs, side=face_size)
-    return cube  # shape: (B, 6, C, face_size, face_size)
+    batch_size = eqr_imgs.shape[0]
+    device = eqr_imgs.device
+    
+    # Process each image sequentially
+    cube_faces_list = []
+    for i in range(batch_size):
+        img_np = eqr_imgs[i].cpu().permute(1, 2, 0).numpy()  # Convert to numpy and change to HWC format
+        cube_face = py360convert.e2c(img_np, cube_format="list")
+        cube_face = np.stack(cube_face)  # Stack the cube faces
+        # print(f"1 cube face shape: {cube_face.shape}")
+        cube_faces_list.append(cube_face)
+    # print(f"Time taken for conversion: {end_time - start_time:.2f} seconds")
+    
+    # Convert back to tensor
+    cube_faces_np = np.stack(cube_faces_list, axis=0)
+    # print(f"Cube faces shape: {cube_faces_np.shape}")
+    return torch.from_numpy(cube_faces_np).permute(0, 1, 4, 2, 3).to(device)
+
+    
 
 
 def average_features_by_view_group(cubemaps, group_indices):
@@ -66,26 +82,63 @@ def compute_group_fid(real_imgs, gen_imgs, group, device='cuda'):
 def compute_omnifid(
     real_images,
     gen_images,
-    pano_size=(512, 256),
+    pano_size=(256, 512),
     face_size=256,
     device='cuda' if torch.cuda.is_available() else 'cpu'
 ):
     """
     Compute OmniFID from equirectangular panoramas.
     """
+    view_map = {
+        'F': [0, 1, 2, 3],  # Front, Right, Back, Left
+        'U': [4],           # Up
+        'D': [5]            # Down
+    }
+    fid_f = FrechetInceptionDistance(feature=2048).to(device)
+    fid_f.set_dtype(torch.float32)
+    fid_u = FrechetInceptionDistance(feature=2048).to(device)
+    fid_u.set_dtype(torch.float32)
+    fid_d = FrechetInceptionDistance(feature=2048).to(device)
+    fid_d.set_dtype(torch.float32)
     # Step 1: Preprocess panos to equirectangular images    
-    real_eqr_imgs = preprocess_images(real_images, pano_size, device)
-    gen_eqr_imgs = preprocess_images(gen_images, pano_size, device)
+    real_eqr_imgs = RealDataset(real_images, transform=preprocess_images())#.to(device)
+    gen_eqr_imgs = GeneratedDataset(gen_images, transform=preprocess_images())#.to(device)
+    real_dl = torch.utils.data.DataLoader(real_eqr_imgs, batch_size=32, shuffle=False, num_workers=4)  
+    gen_dl = torch.utils.data.DataLoader(gen_eqr_imgs, batch_size=32, shuffle=False, num_workers=4)
 
-    # Step 2: Convert equirectangular images to cubemap (B, 6, 3, face_size, face_size)
-    real_cubemaps = equirectangular_to_cubemap_batch(real_eqr_imgs, face_size=face_size)
-    gen_cubemaps = equirectangular_to_cubemap_batch(gen_eqr_imgs, face_size=face_size)
+    for real_batch, gen_batch in tqdm(zip(real_dl, gen_dl), desc="Computing OmniFID", total=len(real_dl)):
+        # print("Start of batch")
+        real_cubemaps = equirectangular_to_cubemap_batch(real_batch, face_size=face_size)
+        gen_cubemaps = equirectangular_to_cubemap_batch(gen_batch, face_size=face_size)
+        # print("Converted to cubemaps")
 
-    # Step 3: Compute FID for each group
-    f_fid = compute_group_fid(real_cubemaps, gen_cubemaps, 'F', device)
-    u_fid = compute_group_fid(real_cubemaps, gen_cubemaps, 'U', device)
-    d_fid = compute_group_fid(real_cubemaps, gen_cubemaps, 'D', device)
+        real_group_imgs_F = average_features_by_view_group(real_cubemaps, view_map["F"])
+        gen_group_imgs_F = average_features_by_view_group(gen_cubemaps, view_map["F"])
+        real_group_imgs_F = (real_group_imgs_F * 255.0).to(torch.uint8)
+        gen_group_imgs_F = (gen_group_imgs_F * 255.0).to(torch.uint8)
 
+        real_group_imgs_U = average_features_by_view_group(real_cubemaps, view_map["U"])
+        gen_group_imgs_U = average_features_by_view_group(gen_cubemaps, view_map["U"])
+        real_group_imgs_U = (real_group_imgs_U * 255.0).to(torch.uint8)
+        gen_group_imgs_U = (gen_group_imgs_U * 255.0).to(torch.uint8)
+
+        real_group_imgs_D = average_features_by_view_group(real_cubemaps, view_map["D"])
+        gen_group_imgs_D = average_features_by_view_group(gen_cubemaps, view_map["D"])
+        real_group_imgs_D = (real_group_imgs_D * 255.0).to(torch.uint8)
+        gen_group_imgs_D = (gen_group_imgs_D * 255.0).to(torch.uint8)
+
+        # print("Averaged features by view group")
+
+        fid_f.update(real_group_imgs_F.to(device), real=True)
+        fid_f.update(gen_group_imgs_F.to(device), real=False)
+        fid_u.update(real_group_imgs_U.to(device), real=True)
+        fid_u.update(gen_group_imgs_U.to(device), real=False)
+        fid_d.update(real_group_imgs_D.to(device), real=True)
+        fid_d.update(gen_group_imgs_D.to(device), real=False)
+
+        # print("Updated FID metrics")
+    
     # Step 4: Average FIDs → OmniFID
-    omnifid_score = (f_fid + u_fid + d_fid) / 3.0
+    omnifid_score = (fid_f.compute().item() + fid_u.compute().item() + fid_d.compute().item()) / 3
+    print(f"OmniFID: {omnifid_score}")
     return omnifid_score

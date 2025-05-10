@@ -2,9 +2,10 @@ import torch
 from torchmetrics.image.kid import KernelInceptionDistance
 from torchvision import transforms
 from tqdm import tqdm
+from utils.dataloader import GeneratedDataset, RealDataset
 
 
-def preprocess_images(images, image_size=(299, 299), normalize=False):
+def preprocess_images(image_size=(299, 299), normalize=False):
     """
     Preprocess images to match the input requirements for the metric.
     Returns a tensor of shape (N, 3, H, W).
@@ -21,10 +22,7 @@ def preprocess_images(images, image_size=(299, 299), normalize=False):
             transforms.Lambda(lambda x: (x * 255).to(torch.uint8))  # cast to uint8 in [0,255]
         ])
 
-    processed_images = []
-    for img in tqdm(images, desc="Preprocessing (KID)"):
-        processed_images.append(tf(img))
-    return torch.stack(processed_images)
+    return tf
 
 
 def compute_kid(real_images, 
@@ -58,13 +56,17 @@ def compute_kid(real_images,
         reset_real_features=True,
         normalize=normalize
     ).to(device)
-    kid_metric.set_dtype(dtype)
+    kid_metric.set_dtype(torch.float32)
 
-    real_imgs = preprocess_images(real_images, normalize=normalize).to(device)
-    gen_imgs = preprocess_images(gen_images, normalize=normalize).to(device)
-
-    kid_metric.update(real_imgs, real=True)
-    kid_metric.update(gen_imgs, real=False)
+    real_images = RealDataset(real_images, transform=preprocess_images(normalize=normalize))#.to(device)
+    gen_images = GeneratedDataset(gen_images, transform=preprocess_images(normalize=normalize))#.to(device)
+    real_dl = torch.utils.data.DataLoader(real_images, batch_size=32, shuffle=False, num_workers=4)
+    gen_dl = torch.utils.data.DataLoader(gen_images, batch_size=32, shuffle=False, num_workers=4)
+    for real_batch, gen_batch in tqdm(zip(real_dl, gen_dl), desc="Computing KID", total=len(real_dl)):
+        # Update metric with batches
+        kid_metric.update(real_batch.to(device), real=True)
+        kid_metric.update(gen_batch.to(device), real=False)
 
     kid_mean, kid_std = kid_metric.compute()
+    print(f"KID mean: {kid_mean}, KID std: {kid_std}")
     return kid_mean.item(), kid_std.item()
