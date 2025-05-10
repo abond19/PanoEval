@@ -16,9 +16,7 @@ A comprehensive evaluation framework for panoramic image generation models.
 ## Installation
 
 ```bash
-git clone https://github.com/emirgocen03/PanoEval.git
-cd PanoEval
-pip install -r requirements.txt
+pip install git+https://github.com/abond19/PanoEval.git
 ```
 
 ## Directory Structure
