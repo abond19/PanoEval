@@ -2,7 +2,7 @@ import torch
 from torchvision import transforms
 from .panfusion_faed import FrechetAutoEncoderDistance
 from tqdm import tqdm
-from utils.dataloader import GeneratedDataset, RealDataset
+from ..utils.dataloader import GeneratedDataset, RealDataset
 
 
 def preprocess_images(image_size=(256, 512), normalize=False):

@@ -2,7 +2,7 @@ import torch
 from torchmetrics.image.inception import InceptionScore
 from torchvision import transforms
 from tqdm import tqdm
-from utils.dataloader import GeneratedDataset
+from ..utils.dataloader import GeneratedDataset
 
 
 def preprocess_images(image_size=(299, 299), normalize=False):

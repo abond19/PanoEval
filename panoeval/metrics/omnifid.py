@@ -5,8 +5,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 import py360convert
 import numpy as np
 from tqdm import tqdm
-from utils.dataloader import GeneratedDataset, RealDataset
-import time
+from ..utils.dataloader import GeneratedDataset, RealDataset
 
 
 def preprocess_images(image_size=(512, 256), device='cuda'):

@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torchvision import transforms
 from tqdm import tqdm
-from utils.dataloader import GeneratedDataset
+from ..utils.dataloader import GeneratedDataset
 
 def preprocess_images(image_size=(512, 256), device='cuda'):
     """

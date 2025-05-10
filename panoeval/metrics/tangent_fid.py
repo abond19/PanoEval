@@ -4,9 +4,9 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from tqdm import tqdm
 from enum import Enum
 import numpy as np
-from utils.dataloader import GeneratedDataset, RealDataset
+from ..utils.dataloader import GeneratedDataset, RealDataset
 
-from eq2pers_v3_updated import process_image_input as get_tangent_images
+from panoeval.eq2pers_v3_updated import process_image_input as get_tangent_images
 
 class ViewGroupType(Enum):
     POLAR_VS_EQUATORIAL = 0

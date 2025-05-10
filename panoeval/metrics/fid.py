@@ -2,7 +2,7 @@ import torch
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchvision import transforms
 from tqdm import tqdm
-from utils.dataloader import GeneratedDataset, RealDataset
+from ..utils.dataloader import GeneratedDataset, RealDataset
 
 
 def preprocess_images(image_size=(299, 299), normalize=False):

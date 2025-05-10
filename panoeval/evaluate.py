@@ -1,15 +1,15 @@
 import os
 import pandas as pd
 from typing import Optional, Dict, Any, List
-from metrics.fid import compute_fid
-from metrics.kid import compute_kid
-from metrics.inception_score import compute_inception_score
-from metrics.clip_score import compute_clip_score
-from metrics.faed import compute_faed
-from metrics.omnifid import compute_omnifid
-from metrics.discontinuity_score import compute_discontinuity_score
-from metrics.tangent_fid import compute_tangentfid
-from utils.dataloader import load_images, load_text_prompts
+from .metrics.fid import compute_fid
+from .metrics.kid import compute_kid
+from .metrics.inception_score import compute_inception_score
+from .metrics.clip_score import compute_clip_score
+from .metrics.faed import compute_faed
+from .metrics.omnifid import compute_omnifid
+from .metrics.discontinuity_score import compute_discontinuity_score
+from .metrics.tangent_fid import compute_tangentfid
+from .utils.dataloader import load_images, load_text_prompts
 
 import wandb
 
@@ -19,7 +19,7 @@ def evaluate_all_metrics(
     prompt_dir: Optional[str] = None,
     output_file: str = "panorama_metrics.csv",
     desired_metrics: Optional[List[str]] = ["fid", "kid", "is", "clip", "faed", "omnifid", "ds", "tangentfid"],
-    use_wandb: bool = False
+    output_to_file: bool = True,
 ) -> Dict[str, float]:
     """
     Evaluate generated panoramic images using multiple metrics.
@@ -114,18 +114,13 @@ def evaluate_all_metrics(
         if "tangentfid" in desired_metrics:
             print("Computing TangentFID...")
             results["TangentFID"] = compute_tangentfid(real_dir, gen_dir)
-
-        if use_wandb:
-            # Initialize Weights & Biases
-            wandb.init(project="panorama_metrics", config={"gen_dir": gen_dir, "real_dir": real_dir, "prompt_dir": prompt_dir})
-            wandb.log(results)
-            wandb.finish()
         
-        # Save results to CSV
-        df = pd.DataFrame([results])
-        df.to_csv(output_file, index=False)
-        print(f"✅ Evaluation complete. Results saved to {output_file}")
-        print(f"Results: {results}")
+        if output_to_file:
+            # Save results to CSV
+            df = pd.DataFrame([results])
+            df.to_csv(output_file, index=False)
+            print(f"✅ Evaluation complete. Results saved to {output_file}")
+            # print(f"Results: {results}")
         
         return results
         

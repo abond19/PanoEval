@@ -2,7 +2,7 @@ import torch
 from torchvision import transforms
 from torchmetrics.multimodal.clip_score import CLIPScore
 from tqdm import tqdm
-from utils.dataloader import GeneratedDataset
+from ..utils.dataloader import GeneratedDataset
 
 
 def preprocess_images(image_size=(224, 224), normalize=True):

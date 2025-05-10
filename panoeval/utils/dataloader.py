@@ -78,7 +78,8 @@ class GeneratedDataset(Dataset):
                 
 
     def __len__(self):
-        assert len(self.images) == len(self.captions), "Number of images and captions must match"
+        if self.take_captions:
+            assert len(self.images) == len(self.captions), "Number of images and captions must match"
         return len(self.images)
     
     def __getitem__(self, idx):
