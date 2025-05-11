@@ -9,6 +9,7 @@ from .metrics.faed import compute_faed
 from .metrics.omnifid import compute_omnifid
 from .metrics.discontinuity_score import compute_discontinuity_score
 from .metrics.tangent_fid import compute_tangentfid
+from .metrics.tangent_is import compute_tangentis
 from .utils.dataloader import load_images, load_text_prompts
 
 import wandb
@@ -18,7 +19,7 @@ def evaluate_all_metrics(
     real_dir: Optional[str] = None,
     prompt_dir: Optional[str] = None,
     output_file: str = "panorama_metrics.csv",
-    desired_metrics: Optional[List[str]] = ["fid", "kid", "is", "clip", "faed", "omnifid", "ds", "tangentfid"],
+    desired_metrics: Optional[List[str]] = ["fid", "kid", "is", "clip", "faed", "omnifid", "ds", "tangentfid", "tangentis"],
     output_to_file: bool = True,
 ) -> Dict[str, float]:
     """
@@ -114,6 +115,10 @@ def evaluate_all_metrics(
         if "tangentfid" in desired_metrics:
             print("Computing TangentFID...")
             results["TangentFID"] = compute_tangentfid(real_dir, gen_dir)
+        
+        if "tangentis" in desired_metrics:
+            print("Computing TangentIS...")
+            results["TangentIS"] = compute_tangentis(gen_dir)
         
         if output_to_file:
             # Save results to CSV
