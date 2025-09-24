@@ -31,7 +31,8 @@ def compute_inception_score(
     splits=10,
     normalize=False,
     dtype=torch.float64,
-    device='cuda' if torch.cuda.is_available() else 'cpu'
+    device='cuda' if torch.cuda.is_available() else 'cpu',
+    use_matterport=True
 ):
     """
     Compute Inception Score for generated images.
@@ -55,7 +56,7 @@ def compute_inception_score(
     inception.set_dtype(torch.float32)
 
     # Preprocess images
-    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images(normalize=normalize))
+    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images(normalize=normalize), use_matterport=use_matterport)
     gen_dl = torch.utils.data.DataLoader(gen_imgs, batch_size=32, shuffle=False, num_workers=4)
     for gen_batch in tqdm(gen_dl, desc="Computing Inception Score", total=len(gen_dl)):
         # Move batch to device

@@ -6,9 +6,10 @@ import py360convert
 import numpy as np
 from tqdm import tqdm
 from ..utils.dataloader import GeneratedDataset, RealDataset
+import torchvision
 
 
-def preprocess_images(image_size=(512, 256), device='cuda'):
+def preprocess_images(image_size=(512, 1024), device='cuda'):
     """
     Preprocess images to match the input requirements for the metric.
     Returns a tensor of shape (N, 3, H, W).
@@ -52,7 +53,7 @@ def average_features_by_view_group(cubemaps, group_indices):
     group_indices: list of indices for the group
     Returns tensor: (B, 3, H, W)
     """
-    group_faces = cubemaps[:, group_indices, :, :, :]  # shape: (B, G, 3, H, W)
+    group_faces = cubemaps[:, group_indices, :]  # shape: (B, G, 3, H, W)
     return group_faces.mean(dim=1)  # average over group faces
 
 
@@ -83,7 +84,8 @@ def compute_omnifid(
     gen_images,
     pano_size=(256, 512),
     face_size=256,
-    device='cuda' if torch.cuda.is_available() else 'cpu'
+    device='cuda' if torch.cuda.is_available() else 'cpu',
+    use_matterport=True
 ):
     """
     Compute OmniFID from equirectangular panoramas.
@@ -100,40 +102,69 @@ def compute_omnifid(
     fid_d = FrechetInceptionDistance(feature=2048).to(device)
     fid_d.set_dtype(torch.float32)
     # Step 1: Preprocess panos to equirectangular images    
-    real_eqr_imgs = RealDataset(real_images, transform=preprocess_images())#.to(device)
-    gen_eqr_imgs = GeneratedDataset(gen_images, transform=preprocess_images())#.to(device)
+    real_eqr_imgs = RealDataset(real_images, transform=preprocess_images(), use_matterport=use_matterport)#.to(device)
+    gen_eqr_imgs = GeneratedDataset(gen_images, transform=preprocess_images(), use_matterport=use_matterport)#.to(device)
     real_dl = torch.utils.data.DataLoader(real_eqr_imgs, batch_size=32, shuffle=False, num_workers=4)  
     gen_dl = torch.utils.data.DataLoader(gen_eqr_imgs, batch_size=32, shuffle=False, num_workers=4)
 
-    for real_batch, gen_batch in tqdm(zip(real_dl, gen_dl), desc="Computing OmniFID", total=len(real_dl)):
+    for idx, (real_batch, gen_batch) in enumerate(tqdm(zip(real_dl, gen_dl), desc="Computing OmniFID", total=len(real_dl))):
+        if idx == 0:
+            torchvision.io.write_png((real_batch[0] * 255).to(torch.uint8), "real_batch.png")
+            torchvision.io.write_png((gen_batch[0] * 255).to(torch.uint8), "gen_batch.png")
         # print("Start of batch")
         real_cubemaps = equirectangular_to_cubemap_batch(real_batch, face_size=face_size)
         gen_cubemaps = equirectangular_to_cubemap_batch(gen_batch, face_size=face_size)
         # print("Converted to cubemaps")
 
-        real_group_imgs_F = average_features_by_view_group(real_cubemaps, view_map["F"])
-        gen_group_imgs_F = average_features_by_view_group(gen_cubemaps, view_map["F"])
-        real_group_imgs_F = (real_group_imgs_F * 255.0).to(torch.uint8)
-        gen_group_imgs_F = (gen_group_imgs_F * 255.0).to(torch.uint8)
+        b1, t1, c1, h1, w1 = real_cubemaps.shape
+        b2, t2, c2, h2, w2 = gen_cubemaps.shape
 
-        real_group_imgs_U = average_features_by_view_group(real_cubemaps, view_map["U"])
-        gen_group_imgs_U = average_features_by_view_group(gen_cubemaps, view_map["U"])
-        real_group_imgs_U = (real_group_imgs_U * 255.0).to(torch.uint8)
-        gen_group_imgs_U = (gen_group_imgs_U * 255.0).to(torch.uint8)
+        if idx == 0:
+            for i in range(t1):
+                torchvision.io.write_png((real_cubemaps[0, i] * 255).to(torch.uint8), f"real_cubemap_{i}.png")
+                torchvision.io.write_png((gen_cubemaps[0, i] * 255).to(torch.uint8), f"gen_cubemap_{i}.png")
 
-        real_group_imgs_D = average_features_by_view_group(real_cubemaps, view_map["D"])
-        gen_group_imgs_D = average_features_by_view_group(gen_cubemaps, view_map["D"])
-        real_group_imgs_D = (real_group_imgs_D * 255.0).to(torch.uint8)
-        gen_group_imgs_D = (gen_group_imgs_D * 255.0).to(torch.uint8)
+        real_cubemaps = real_cubemaps.reshape(b1 * t1, c1, h1, w1).to(device)
+        gen_cubemaps = gen_cubemaps.reshape(b2 * t2, c2, h2, w2).to(device)
+
+        real_cube_features = fid_f.inception((real_cubemaps * 255.0).to(torch.uint8))
+        gen_cube_features = fid_f.inception((gen_cubemaps * 255.0).to(torch.uint8))
+        real_cube_features = real_cube_features.reshape(b1, t1, -1)
+        gen_cube_features = gen_cube_features.reshape(b2, t2, -1)
+
+        real_group_imgs_F = average_features_by_view_group(real_cube_features, view_map["F"])
+        gen_group_imgs_F = average_features_by_view_group(gen_cube_features, view_map["F"])
+
+        real_group_imgs_U = average_features_by_view_group(real_cube_features, view_map["U"])
+        gen_group_imgs_U = average_features_by_view_group(gen_cube_features, view_map["U"])
+
+        real_group_imgs_D = average_features_by_view_group(real_cube_features, view_map["D"])
+        gen_group_imgs_D = average_features_by_view_group(gen_cube_features, view_map["D"])
 
         # print("Averaged features by view group")
 
-        fid_f.update(real_group_imgs_F.to(device), real=True)
-        fid_f.update(gen_group_imgs_F.to(device), real=False)
-        fid_u.update(real_group_imgs_U.to(device), real=True)
-        fid_u.update(gen_group_imgs_U.to(device), real=False)
-        fid_d.update(real_group_imgs_D.to(device), real=True)
-        fid_d.update(gen_group_imgs_D.to(device), real=False)
+        # Update FID metrics
+        fid_f.real_features_sum += real_group_imgs_F.sum(dim=0)
+        fid_f.real_features_cov_sum += real_group_imgs_F.t().mm(real_group_imgs_F)
+        fid_f.real_features_num_samples += real_group_imgs_F.shape[0]
+        fid_f.fake_features_sum += gen_group_imgs_F.sum(dim=0)
+        fid_f.fake_features_cov_sum += gen_group_imgs_F.t().mm(gen_group_imgs_F)
+        fid_f.fake_features_num_samples += gen_group_imgs_F.shape[0]
+        fid_f.orig_dtype = real_group_imgs_F.dtype
+        fid_u.real_features_sum += real_group_imgs_U.sum(dim=0)
+        fid_u.real_features_cov_sum += real_group_imgs_U.t().mm(real_group_imgs_U)
+        fid_u.real_features_num_samples += real_group_imgs_U.shape[0]
+        fid_u.fake_features_sum += gen_group_imgs_U.sum(dim=0)
+        fid_u.fake_features_cov_sum += gen_group_imgs_U.t().mm(gen_group_imgs_U)
+        fid_u.fake_features_num_samples += gen_group_imgs_U.shape[0]
+        fid_u.orig_dtype = real_group_imgs_U.dtype
+        fid_d.real_features_sum += real_group_imgs_D.sum(dim=0)
+        fid_d.real_features_cov_sum += real_group_imgs_D.t().mm(real_group_imgs_D)
+        fid_d.real_features_num_samples += real_group_imgs_D.shape[0]
+        fid_d.fake_features_sum += gen_group_imgs_D.sum(dim=0)
+        fid_d.fake_features_cov_sum += gen_group_imgs_D.t().mm(gen_group_imgs_D)
+        fid_d.fake_features_num_samples += gen_group_imgs_D.shape[0]
+        fid_d.orig_dtype = real_group_imgs_D.dtype
 
         # print("Updated FID metrics")
     

@@ -25,7 +25,7 @@ def preprocess_images(image_size=(299, 299), normalize=False):
     return tf
 
 
-def compute_fid(real_images, gen_images, feature_dim=2048, normalize=False, dtype=torch.float64, device='cuda' if torch.cuda.is_available() else 'cpu'):
+def compute_fid(real_images, gen_images, feature_dim=2048, normalize=False, dtype=torch.float64, device='cuda' if torch.cuda.is_available() else 'cpu', use_matterport=True):
     """
     Compute FID score between real and generated images.
 
@@ -49,8 +49,8 @@ def compute_fid(real_images, gen_images, feature_dim=2048, normalize=False, dtyp
     fid_metric.set_dtype(dtype)
 
     # Load image tensors
-    real_imgs = RealDataset(real_images, transform=preprocess_images(normalize=normalize))#.to(device)
-    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images(normalize=normalize))#.to(device)
+    real_imgs = RealDataset(real_images, transform=preprocess_images(normalize=normalize), use_matterport=use_matterport)#.to(device)
+    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images(normalize=normalize), use_matterport=use_matterport)#.to(device)
 
     real_dl = torch.utils.data.DataLoader(real_imgs, batch_size=32, shuffle=False, num_workers=4)
     gen_dl = torch.utils.data.DataLoader(gen_imgs, batch_size=32, shuffle=False, num_workers=4)

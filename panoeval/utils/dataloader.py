@@ -5,9 +5,12 @@ from tqdm import tqdm
 from torch.utils.data import Dataset
 import torch
 
-def find_png_files(directory):
+def find_png_files(directory, use_matterport):
+    # print(f"Using matterport: {use_matterport}")
     png_files = []
     for root, dirs, files in os.walk(directory):
+        if not use_matterport and 'matterport' in dirs:
+            dirs.remove('matterport')
         for file in files:
             if file.lower().endswith('.png') or file.lower().endswith('.jpg') or file.lower().endswith('.jpeg'):
                 png_files.append(os.path.join(root, file))
@@ -41,8 +44,8 @@ def load_text_prompts(folder):
 
 
 class RealDataset(Dataset):
-    def __init__(self, folder, transform):
-        self.images = find_png_files(folder)
+    def __init__(self, folder, transform, use_matterport=False):
+        self.images = find_png_files(folder, True)
         self.folder = folder
         self.transform = transform
     def __len__(self):
@@ -54,8 +57,8 @@ class RealDataset(Dataset):
         return img
 
 class GeneratedDataset(Dataset):
-    def __init__(self, folder, transform, take_captions=False, text_prompts_folder=None):
-        self.images = find_png_files(folder)
+    def __init__(self, folder, transform, take_captions=False, text_prompts_folder=None, use_matterport=False):
+        self.images = find_png_files(folder, True)
         self.folder = folder
         self.transform = transform
 
@@ -67,12 +70,21 @@ class GeneratedDataset(Dataset):
 
     def load_text_prompts(self, folder):
         prompts = []
-        for img in self.images:
+        idx_to_remove = []
+        for i in range(len(self.images)):
+            img = self.images[i]
             img_name = img.split("/")[-2]
             dataset_name = img.split("/")[-3]
             prompt_path = os.path.join(folder, dataset_name, img_name.split(".")[0], "caption.txt")
-            assert os.path.exists(prompt_path), f"Prompt file {prompt_path} does not exist"
+            # assert os.path.exists(prompt_path), f"Prompt file {prompt_path} does not exist"
+            if not os.path.exists(prompt_path):
+                idx_to_remove.append(i)
+                continue
             prompts.append(prompt_path)
+
+        # Remove images without captions
+        for i in sorted(idx_to_remove, reverse=True):
+            del self.images[i]
 
         return prompts
                 

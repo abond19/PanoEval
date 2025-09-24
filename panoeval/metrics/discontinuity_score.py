@@ -4,7 +4,7 @@ from torchvision import transforms
 from tqdm import tqdm
 from ..utils.dataloader import GeneratedDataset
 
-def preprocess_images(image_size=(512, 256), device='cuda'):
+def preprocess_images(image_size=(256, 512), device='cuda'):
     """
     Preprocess images to match the input requirements for the metric.
     Returns a list of tensors of shape (3, H, W).
@@ -57,7 +57,8 @@ def compute_ds_score(gray_seam, kernel, eps=0.1):
     return (top.sum() + bottom.sum()).item() / (2 * L)
 
 
-def compute_discontinuity_score(gen_images, image_size=(512, 256), device='cuda'):
+# TODO: Double check later
+def compute_discontinuity_score(gen_images, image_size=(512, 256), device='cuda', use_matterport=True):
     """
     Computes average Discontinuity Score for all generated panoramas in folder.
     """
@@ -67,7 +68,7 @@ def compute_discontinuity_score(gen_images, image_size=(512, 256), device='cuda'
     scale_factor = seam_width / height
 
     # image_tensors = preprocess_images(gen_images, image_size=image_size, device=device)
-    image_tensors = GeneratedDataset(gen_images, transform=preprocess_images())
+    image_tensors = GeneratedDataset(gen_images, transform=preprocess_images(), use_matterport=use_matterport)
 
     dataloader = torch.utils.data.DataLoader(image_tensors, batch_size=1, shuffle=False, num_workers=4)
 

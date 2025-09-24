@@ -32,7 +32,8 @@ def compute_kid(real_images,
                 subset_size=1000, 
                 normalize=False, 
                 dtype=torch.float64, 
-                device='cuda' if torch.cuda.is_available() else 'cpu'):
+                device='cuda' if torch.cuda.is_available() else 'cpu',
+                use_matterport=True):
     """
     Compute Kernel Inception Distance (KID) between real and generated image directories.
 
@@ -58,8 +59,8 @@ def compute_kid(real_images,
     ).to(device)
     kid_metric.set_dtype(torch.float32)
 
-    real_images = RealDataset(real_images, transform=preprocess_images(normalize=normalize))#.to(device)
-    gen_images = GeneratedDataset(gen_images, transform=preprocess_images(normalize=normalize))#.to(device)
+    real_images = RealDataset(real_images, transform=preprocess_images(normalize=normalize), use_matterport=use_matterport)#.to(device)
+    gen_images = GeneratedDataset(gen_images, transform=preprocess_images(normalize=normalize), use_matterport=use_matterport)#.to(device)
     real_dl = torch.utils.data.DataLoader(real_images, batch_size=32, shuffle=False, num_workers=4)
     gen_dl = torch.utils.data.DataLoader(gen_images, batch_size=32, shuffle=False, num_workers=4)
     for real_batch, gen_batch in tqdm(zip(real_dl, gen_dl), desc="Computing KID", total=len(real_dl)):

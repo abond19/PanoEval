@@ -12,6 +12,10 @@ from .metrics.tangent_fid import compute_tangentfid
 from .metrics.tangent_is import compute_tangentis
 from .utils.dataloader import load_images, load_text_prompts
 
+import torch
+
+torch.set_grad_enabled(False)
+
 import wandb
 
 def evaluate_all_metrics(
@@ -21,6 +25,8 @@ def evaluate_all_metrics(
     output_file: str = "panorama_metrics.csv",
     desired_metrics: Optional[List[str]] = ["fid", "kid", "is", "clip", "faed", "omnifid", "ds", "tangentfid", "tangentis"],
     output_to_file: bool = True,
+    longer_captions: bool = False,
+    use_matterport: bool = False
 ) -> Dict[str, float]:
     """
     Evaluate generated panoramic images using multiple metrics.
@@ -81,44 +87,44 @@ def evaluate_all_metrics(
 
     # Initialize results dictionary
     results: Dict[str, float] = {}
-
+    # print(f"Using matterport: {use_matterport}")
     try:
         # Compute all metrics
         if "fid" in desired_metrics:
             print("Computing FID...")
-            results["FID"] = compute_fid(real_dir, gen_dir)
+            results["FID"] = compute_fid(real_dir, gen_dir, use_matterport=use_matterport)
         
         if "kid" in desired_metrics:
             print("Computing KID...")
-            results["KID"] = compute_kid(real_dir, gen_dir)
+            results["KID"] = compute_kid(real_dir, gen_dir, use_matterport=use_matterport)
         
         if "is" in desired_metrics:
             print("Computing Inception Score...")
-            results["IS"] = compute_inception_score(gen_dir)
+            results["IS"] = compute_inception_score(gen_dir, use_matterport=use_matterport)
         
         if "clip" in desired_metrics:
             print("Computing CLIP Score...")
-            results["CLIP Score"] = compute_clip_score(gen_dir, prompt_dir)
+            results["CLIP Score"] = compute_clip_score(gen_dir, prompt_dir, longer_captions=longer_captions, use_matterport=use_matterport)
         
         if "faed" in desired_metrics:
             print("Computing FAED...")
-            results["FAED"] = compute_faed(real_dir, gen_dir)
+            results["FAED"] = compute_faed(real_dir, gen_dir, use_matterport=use_matterport)
         
         if "omnifid" in desired_metrics:
             print("Computing OmniFID...")
-            results["OmniFID"] = compute_omnifid(real_dir, gen_dir)
+            results["OmniFID"] = compute_omnifid(real_dir, gen_dir, use_matterport=use_matterport)
         
         if "ds" in desired_metrics:
             print("Computing Discontinuity Score...")
-            results["Discontinuity Score"] = compute_discontinuity_score(gen_dir)
+            results["Discontinuity Score"] = compute_discontinuity_score(gen_dir, use_matterport=use_matterport)
 
         if "tangentfid" in desired_metrics:
             print("Computing TangentFID...")
-            results["TangentFID"] = compute_tangentfid(real_dir, gen_dir)
+            results["TangentFID"] = compute_tangentfid(real_dir, gen_dir, use_matterport=use_matterport)
         
         if "tangentis" in desired_metrics:
             print("Computing TangentIS...")
-            results["TangentIS"] = compute_tangentis(gen_dir)
+            results["TangentIS"] = compute_tangentis(gen_dir, use_matterport=use_matterport)
         
         if output_to_file:
             # Save results to CSV

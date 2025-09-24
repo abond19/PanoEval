@@ -359,7 +359,7 @@ class FrechetAutoEncoderDistance(Metric):
 
     def __init__(self, pano_height: int):
         super().__init__()
-        ckpt_path = os.path.join('weights', 'faed.ckpt')
+        ckpt_path = os.path.join("panoeval", 'weights', 'faed.ckpt')
         faed = FAED.load_from_checkpoint(ckpt_path)
         self.encoder = faed.net.encoder
 

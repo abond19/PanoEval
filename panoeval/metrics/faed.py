@@ -24,7 +24,8 @@ def compute_faed(
     gen_images,
     pano_height=256,
     image_size=(256, 512),
-    device='cuda' if torch.cuda.is_available() else 'cpu'
+    device='cuda' if torch.cuda.is_available() else 'cpu',
+    use_matterport=True
 ):
     """
     Compute Frechet AutoEncoder Distance (FAED) between real and generated panoramic images.
@@ -46,8 +47,8 @@ def compute_faed(
     # real_imgs = preprocess_images(real_images, image_size=image_size).to(device)
     # gen_imgs = preprocess_images(gen_images, image_size=image_size).to(device)
 
-    real_imgs = RealDataset(real_images, transform=preprocess_images())#.to(device)
-    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images())#.to(device)
+    real_imgs = RealDataset(real_images, transform=preprocess_images(), use_matterport=use_matterport)#.to(device)
+    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images(), use_matterport=use_matterport)#.to(device)
 
     real_dl = torch.utils.data.DataLoader(real_imgs, batch_size=32, shuffle=False, num_workers=4)
     gen_dl = torch.utils.data.DataLoader(gen_imgs, batch_size=32, shuffle=False, num_workers=4)

@@ -28,7 +28,9 @@ def compute_clip_score(
     gen_images,
     text_prompts,
     model_name="openai/clip-vit-large-patch14",
-    device='cuda' if torch.cuda.is_available() else 'cpu'
+    device='cuda' if torch.cuda.is_available() else 'cpu',
+    longer_captions=False,
+    use_matterport=True
 ):
     """
     Compute CLIP Score between generated images and their corresponding captions.
@@ -44,12 +46,15 @@ def compute_clip_score(
     """
     # Load images and captions
     # gen_imgs = preprocess_images(gen_images).to(device)
-    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images(), take_captions=True, text_prompts_folder=text_prompts)
+    gen_imgs = GeneratedDataset(gen_images, transform=preprocess_images(), take_captions=True, text_prompts_folder=text_prompts, use_matterport=use_matterport)
 
     gen_dl = torch.utils.data.DataLoader(gen_imgs, batch_size=32, shuffle=False, num_workers=4)
 
     # Initialize CLIPScore metric
-    metric = CLIPScore(model_name_or_path=model_name).to(device)
+    if longer_captions:
+        metric = CLIPScore(model_name_or_path="zer0int/LongCLIP-L-Diffusers").to(device)
+    else:
+        metric = CLIPScore(model_name_or_path=model_name).to(device)
 
     # metric.set_dtype(torch.float32)
 
