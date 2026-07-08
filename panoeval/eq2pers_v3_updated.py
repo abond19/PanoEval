@@ -10,7 +10,111 @@ import os
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
 
-def equi2pers(erp_img, fov, patch_size):
+
+# ---------------------------------------------------------------------------
+# Tangent-plane extraction configurations.
+#
+# Each named configuration describes how the sphere is decomposed into a set of
+# perspective (tangent-plane) views. Grid configurations follow the row/column
+# layout used throughout the paper (a list of column counts per latitude row and
+# the latitude center of each row). The number of extracted planes is simply
+# ``sum(num_cols)``.
+#
+# The rebuttal ablation compares:
+#   tangent_10  -> 3 rows,  num_cols [3, 4, 3]              (10 planes)
+#   tangent_18  -> 4 rows,  num_cols [3, 6, 6, 3]           (18 planes, default)
+#   tangent_26  -> 5 rows,  num_cols [3, 6, 8, 6, 3]        (26 planes)
+#   tangent_46  -> 6 rows,  num_cols [3, 8, 12, 12, 8, 3]   (46 planes)
+#   cubemap     -> the 6 standard cubemap faces (fov 90)
+# ---------------------------------------------------------------------------
+
+DEFAULT_CONFIG = "tangent_18"
+
+# name -> (num_cols per row, phi (latitude) center per row)
+_GRID_SPECS = {
+    "tangent_10": ([3, 4, 3], [-60, 0, 60]),
+    "tangent_18": ([3, 6, 6, 3], [-67.5, -22.5, 22.5, 67.5]),
+    "tangent_26": ([3, 6, 8, 6, 3], [-72.2, -36.1, 0, 36.1, 72.2]),
+    "tangent_46": ([3, 8, 12, 12, 8, 3], [-75.2, -45.93, -15.72, 15.72, 45.93, 75.2]),
+}
+
+# Field of view (degrees) used for the tangent-plane gnomonic projection.
+_TANGENT_FOV = (80, 80)
+
+
+def _build_grid(num_cols, phi_centers):
+    """Build the (theta, phi) center of every patch for a row/column grid.
+
+    Returns the list of centers in raster order (row 0 first) together with a
+    boolean per patch marking whether it lies in a polar (first/last) row.
+    """
+    combos = []
+    polar = []
+    num_rows = len(num_cols)
+    for i, n_cols in enumerate(num_cols):
+        theta_interval = 360 / n_cols
+        for j in range(n_cols):
+            theta_center = j * theta_interval + theta_interval / 2
+            combos.append([theta_center, phi_centers[i]])
+            polar.append(i == 0 or i == num_rows - 1)
+    return combos, polar
+
+
+def get_extraction_config(name):
+    """Resolve a configuration name to a fully-specified extraction config.
+
+    The returned dict contains:
+        name        : the configuration name
+        combos      : list of [theta_center, phi_center] (degrees) per plane
+        polar       : list[bool], True for polar (pole-row) planes
+        fov         : (fov_h, fov_w) in degrees
+        num_planes  : number of extracted planes
+    """
+    if name == "cubemap":
+        # front, right, back, left (equatorial), up, down (poles)
+        combos = [[0, 0], [90, 0], [180, 0], [270, 0], [0, 90], [0, -90]]
+        polar = [False, False, False, False, True, True]
+        return {
+            "name": name,
+            "combos": combos,
+            "polar": polar,
+            "fov": (90, 90),
+            "num_planes": len(combos),
+        }
+    if name not in _GRID_SPECS:
+        raise ValueError(
+            f"Unknown extraction config '{name}'. "
+            f"Available: {list(_GRID_SPECS.keys()) + ['cubemap']}"
+        )
+    num_cols, phi_centers = _GRID_SPECS[name]
+    combos, polar = _build_grid(num_cols, phi_centers)
+    return {
+        "name": name,
+        "combos": combos,
+        "polar": polar,
+        "fov": _TANGENT_FOV,
+        "num_planes": len(combos),
+    }
+
+
+def build_view_groups(config):
+    """Build per-view groups for the distortion-aware metrics.
+
+    Each tangent plane forms its own view group (as used for TangentFID /
+    TangentIS in Eq. 5), so that per-view statistics can be aggregated into a
+    confidence bound. Polar (pole-row) planes receive weight 0.5 and all other
+    planes weight 1.0, matching the original 18-plane library behaviour.
+
+    Returns (view_map, weights) where both are dicts keyed by view name.
+    """
+    n = config["num_planes"]
+    polar = config["polar"]
+    view_map = {f"view_{i}": [i] for i in range(n)}
+    weights = {f"view_{i}": (0.5 if polar[i] else 1.0) for i in range(n)}
+    return view_map, weights
+
+
+def equi2pers(erp_img, fov, patch_size, config=None):
     bs, _, erp_h, erp_w = erp_img.shape
     height, width = pair(patch_size)
     fov_h, fov_w = pair(fov)
@@ -22,38 +126,9 @@ def equi2pers(erp_img, fov, patch_size):
     yy, xx = torch.meshgrid(torch.linspace(0, 1, height), torch.linspace(0, 1, width))
     screen_points = torch.stack([xx.flatten(), yy.flatten()], -1)
 
-    # num_rows = 3
-    # num_cols = [3, 4, 3]
-    # phi_centers = [-60, 0, 60]
-    num_rows = 4
-    num_cols = [3, 6, 6, 3]
-    phi_centers = [-67.5, -22.5, 22.5, 67.5]
-    phi_interval = 180 // num_rows
-    all_combos = []
-    erp_mask = []
-    for i, n_cols in enumerate(num_cols):
-        for j in np.arange(n_cols):
-            theta_interval = 360 / n_cols
-            theta_center = j * theta_interval + theta_interval / 2
-
-            center = [theta_center, phi_centers[i]]
-            all_combos.append(center)
-            up = phi_centers[i] + phi_interval / 2
-            down = phi_centers[i] - phi_interval / 2
-            left = theta_center - theta_interval / 2
-            right = theta_center + theta_interval / 2
-            up = int((up + 90) / 180 * erp_h)
-            down = int((down + 90) / 180 * erp_h)
-            left = int(left / 360 * erp_w)
-            right = int(right / 360 * erp_w)
-            mask = np.zeros((erp_h, erp_w), dtype=int)
-            mask[down:up, left:right] = 1
-            erp_mask.append(mask)
-    all_combos = np.vstack(all_combos) 
-    shifts = np.arange(all_combos.shape[0]) * width
-    shifts = torch.from_numpy(shifts).float()
-    erp_mask = np.stack(erp_mask)
-    erp_mask = torch.from_numpy(erp_mask).float()
+    if config is None:
+        config = get_extraction_config(DEFAULT_CONFIG)
+    all_combos = np.array(config['combos'], dtype=np.float32)
     num_patch = all_combos.shape[0]
 
     center_point = torch.from_numpy(all_combos).float()  # -180 to 180, -90 to 90
@@ -178,13 +253,16 @@ def process_image(file_path, output_dir):
         cv2.imwrite(img_name, sub_img)
         print(f'saved {img_name}')
 
-def process_image_input(image, patch_size=256):
+def process_image_input(image, patch_size=256, config=None):
+    if config is None:
+        config = get_extraction_config(DEFAULT_CONFIG)
     image = image.unsqueeze(0)
-    pers = equi2pers(image, fov=(80, 80), patch_size=(patch_size, patch_size))
+    pers = equi2pers(image, fov=config['fov'], patch_size=(patch_size, patch_size), config=config)
     pers = pers[0]
+    num_planes = config['num_planes']
     tangent_images = []
     # print(pers.shape)
-    for i in range(18):
+    for i in range(num_planes):
         sub_img = pers[:, :, i * patch_size: (i+ 1) * patch_size ]
         tangent_images.append(sub_img)
     tangent_images = torch.stack(tangent_images, dim=0)

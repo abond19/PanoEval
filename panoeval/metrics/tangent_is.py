@@ -4,11 +4,17 @@ import torchvision
 from torchmetrics.image.inception import InceptionScore
 from tqdm import tqdm
 from enum import Enum
+from functools import partial
 import numpy as np
 from ..utils.dataloader import GeneratedDataset, RealDataset
 from .dinov2 import DINOv2Encoder
 
-from panoeval.eq2pers_v3_updated import process_image_input as get_tangent_images
+from panoeval.eq2pers_v3_updated import (
+    process_image_input as get_tangent_images,
+    get_extraction_config,
+    build_view_groups,
+)
+from .tangent_ci import summarize_ci
 
 class ViewGroupType(Enum):
     POLAR_VS_EQUATORIAL = 0
@@ -63,15 +69,58 @@ def preprocess_images(image_size=(512, 1024), device="cuda"):
 
     return tf
 
-def equirectangular_to_tangents_batch(eqr_imgs, face_size=192):
-    B, C, H, W = eqr_imgs.shape
-
-    results = torch.vmap(get_tangent_images)(eqr_imgs, patch_size=face_size)
-    return results  # shape: (B, 18, C, face_size, face_size)
+def equirectangular_to_tangents_batch(eqr_imgs, face_size=192, config=None):
+    # Bind the (static) patch size and extraction config so vmap only maps over
+    # the batch dimension of the ERP images.
+    fn = partial(get_tangent_images, patch_size=face_size, config=config)
+    results = torch.vmap(fn)(eqr_imgs)
+    return results  # shape: (B, num_planes, C, face_size, face_size)
 
 def average_features_by_view_group(tangent_imgs, group_indices):
     group_faces = tangent_imgs[:, group_indices, :]  # shape: (B, G, 3, H, W)
     return group_faces.mean(dim=1)  # average over group faces
+
+
+def _inception_score(logits, splits):
+    """Mean Inception Score from a set of Inception logits.
+
+    Replicates torchmetrics' InceptionScore.compute (mean over ``splits``),
+    letting us recompute a view's IS on bootstrap resamples cheaply.
+    """
+    prob = logits.softmax(dim=1)
+    log_prob = logits.log_softmax(dim=1)
+    n = prob.shape[0]
+    step = max(n // splits, 1)
+    scores = []
+    for k in range(splits):
+        p = prob[k * step:(k + 1) * step]
+        lp = log_prob[k * step:(k + 1) * step]
+        if p.shape[0] == 0:
+            continue
+        mean_p = p.mean(dim=0, keepdim=True)
+        kl = (p * (lp - mean_p.log())).sum(dim=1)
+        scores.append(kl.mean().exp())
+    return float(torch.stack(scores).mean().item())
+
+
+def _extract_view_logits(dataloader, extractor, config, view_map, face_size, device, desc):
+    """Run the Inception logit extractor on every tangent view of a dataset.
+
+    Returns a list (one per view group) of ``(N, C)`` CPU tensors of per-image
+    logits, cached so bootstrap resampling avoids re-running the network.
+    """
+    groups = list(view_map.keys())
+    per_view = [[] for _ in groups]
+    for batch in tqdm(dataloader, desc=desc, total=len(dataloader)):
+        tangent = equirectangular_to_tangents_batch(batch, face_size=face_size, config=config)
+        b, t, c, h, w = tangent.shape
+        tangent = tangent.reshape(b * t, c, h, w).to(device)
+        logits = extractor((tangent * 255.0).to(torch.uint8))
+        logits = logits.reshape(b, t, -1)
+        for gi, group in enumerate(groups):
+            group_logits = average_features_by_view_group(logits, view_map[group])  # (b, C)
+            per_view[gi].append(group_logits.detach().cpu())
+    return [torch.cat(chunks, dim=0) for chunks in per_view]
 
 # def compute_group_fid(gen_imgs, group, device="cuda", view_group_type=ViewGroupType.POLAR_VS_EQUATORIAL):
 #     view_group = view_map_types[view_group_type][group]
@@ -92,98 +141,82 @@ def compute_tangentis(
     pano_size=(512, 1024),
     face_size=192,
     device="cuda" if torch.cuda.is_available() else "cpu",
-    view_group_type=ViewGroupType.ALL_DIFFERENT,
+    config_name="tangent_18",
+    return_details=False,
+    n_bootstrap=0,
+    bootstrap_seed=0,
     use_matterport=True
 ):
-    # real_eqr_imgs = preprocess_images(real_images, image_size=pano_size, device=device)
-    # gen_eqr_imgs = preprocess_images(gen_images, image_size=pano_size, device=device)
-    gen_eqr_imgs = GeneratedDataset(gen_images, transform=preprocess_images(), use_matterport=use_matterport)#.to(device)
+    """Compute TangentIS for a given tangent-plane extraction configuration.
 
+    Inception Score is computed independently on each tangent view; the per-view
+    scores are summarised into a confidence bound. Several bound variants are
+    produced (see ``tangent_ci.summarize_ci``): ``gaussian`` (Eq. 5, assumes
+    independent views), ``tolerance`` (drops sqrt(K)), and — when
+    ``n_bootstrap > 0`` — ``effective_n``, ``bootstrap_se`` and ``bootstrap_pct``,
+    which relax the independence assumption using the correlation between
+    overlapping views.
+
+    Per-view Inception logits are cached so the bootstrap resamples whole
+    panoramas (preserving cross-view correlation) without re-running the network.
+
+    ``config_name`` selects the extraction layout (e.g. "tangent_10",
+    "tangent_18", "tangent_26", "tangent_46" or "cubemap").
+
+    By default the mean per-view IS is returned (backwards compatible). Set
+    ``return_details=True`` to obtain a dict with the full per-view breakdown and
+    every confidence-bound variant.
+    """
+    config = get_extraction_config(config_name)
+    view_map, _ = build_view_groups(config)
+    group_names = list(view_map.keys())
+    K = len(group_names)
+
+    gen_eqr_imgs = GeneratedDataset(gen_images, transform=preprocess_images(), use_matterport=use_matterport)
     gen_dl = torch.utils.data.DataLoader(gen_eqr_imgs, batch_size=32, shuffle=False, num_workers=4)
 
-    # dino_model = DINOv2Encoder(arch="vitb14").to(device)
+    extractor = InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device).inception
 
-    # feature = 768
+    # Cache per-view logits once (the expensive Inception forward pass).
+    gen_logits = _extract_view_logits(
+        gen_dl, extractor, config, view_map, face_size, device, f"TangentIS logits [{config_name}]"
+    )
 
-    if view_group_type == ViewGroupType.POLAR_VS_EQUATORIAL:
-        is_scores = {
-            "Polar": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Equatorial": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device)
-        }
-    elif view_group_type == ViewGroupType.ROW_BASED:
-        is_scores = {
-            "Top": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 1": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 2": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Bottom": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device)
-        }
-    elif view_group_type == ViewGroupType.THREE_ROWS:
-        is_scores = {
-            "Top": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Bottom": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device)
-        }
-    elif view_group_type == ViewGroupType.ALL_DIFFERENT:
-        is_scores = {
-            "Top1": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Top2": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Top3": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 1": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 2": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 3": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 4": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 5": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 6": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 7": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 8": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 9": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 10": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 11": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Middle 12": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Bottom 1": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Bottom 2": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device),
-            "Bottom 3": InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device)
-        }
+    # Point estimate: one IS per view from the full generated set.
+    point_scores = np.array(
+        [_inception_score(gen_logits[v].to(device), splits) for v in range(K)],
+        dtype=np.float64,
+    )
+    for name, score in zip(group_names, point_scores):
+        print(f"TangentIS {name}: {score:.4f}")
 
-    for idx, gen_batch in enumerate(tqdm(gen_dl, desc="Computing TangentIS", total=len(gen_dl))):
-        # if idx == 0:
-        #     torchvision.io.write_png((gen_batch[0] * 255).to(torch.uint8), f"test_tangents/gen_img_{idx}.png")
-        gen_tangent_imgs = equirectangular_to_tangents_batch(gen_batch, face_size=face_size)
-        b, t, c, h, w = gen_tangent_imgs.shape
+    # Bootstrap: resample the generated panoramas and recompute every per-view IS.
+    boot_scores = None
+    if n_bootstrap and n_bootstrap > 0:
+        rng = np.random.default_rng(bootstrap_seed)
+        n_gen = gen_logits[0].shape[0]
+        gen_dev = [gl.to(device) for gl in gen_logits]
+        boot_scores = np.empty((n_bootstrap, K), dtype=np.float64)
+        for bi in tqdm(range(n_bootstrap), desc=f"Bootstrap TangentIS [{config_name}]"):
+            idx = torch.as_tensor(rng.integers(0, n_gen, size=n_gen), device=device)
+            for v in range(K):
+                boot_scores[bi, v] = _inception_score(gen_dev[v][idx], splits)
 
-        # if idx == 0:
-        #     for i in range(t):
-        #         torchvision.io.write_png((gen_tangent_imgs[0, i] * 255).to(torch.uint8), f"test_tangents/tangent_img_{i}.png")
+    summary = summarize_ci(point_scores, boot_scores, side="lower")
 
-        gen_tangent_imgs = gen_tangent_imgs.view(b * t, c, h, w)
+    print(f"[{config_name}] TangentIS mean: {summary['mean']:.4f}  std: {summary['std']:.4f}  K: {K}")
+    print(f"[{config_name}] TangentIS gaussian (Eq.5):  {summary['ci_gaussian']:.4f}")
+    print(f"[{config_name}] TangentIS tolerance:        {summary['ci_tolerance']:.4f}")
+    if boot_scores is not None:
+        print(f"[{config_name}] TangentIS effective_n:      {summary['ci_effective_n']:.4f} "
+              f"(rho_bar={summary['rho_bar']:.3f}, K_eff={summary['k_eff']:.2f})")
+        print(f"[{config_name}] TangentIS bootstrap_se:     {summary['ci_bootstrap_se']:.4f}")
+        print(f"[{config_name}] TangentIS bootstrap_pct:    {summary['ci_bootstrap_pct']:.4f}")
 
-        gen_tangent_features = list(is_scores.values())[0].inception((gen_tangent_imgs * 255.0).to(torch.uint8).to(device))
-        # gen_tangent_features = dino_model(dino_model.tensor_transform(gen_tangent_imgs.to(device)))
-        gen_tangent_features = gen_tangent_features.view(b, t, -1)
-
-        for group in view_map_types[view_group_type].keys():
-            gen_group_imgs = average_features_by_view_group(gen_tangent_features, view_map_types[view_group_type][group])
-
-            is_scores[group].features.append(gen_group_imgs)
-
-    average_is = 0.0
-    is_var = 0.0
-    all_is_scores = []
-    # Compute FID for each group
-    for group in is_scores.keys():
-        mean, var = is_scores[group].compute()
-        average_is += mean.item()
-        is_var += var.item() ** 2
-        all_is_scores.append(mean.item())
-        print(f"TangentIS {group}: {mean} ± {var}")
-
-    average_is /= len(is_scores)
-    is_var /= len(is_scores)**2
-    all_var = np.var(np.array(all_is_scores))
-    print(f"TangentIS mean: {average_is}")
-    print(f"TangentIS var: {is_var}")
-    print(f"TangentIS all var: {all_var}")
-    print("Confidence bound for TangentIS: ", average_is  - 1.96 * np.sqrt(all_var) / np.sqrt(len(is_scores)))
-
-
-    return average_is
+    if return_details:
+        details = {"config": config_name, "metric": "TangentIS"}
+        details.update(summary)
+        details["per_view"] = dict(zip(group_names, point_scores.tolist()))
+        details["tangentis"] = summary["ci_gaussian"]  # headline value (paper default)
+        return details
+    return summary["mean"]
