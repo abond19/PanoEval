@@ -1,5 +1,9 @@
 from panoeval.evaluate import evaluate_all_metrics
 import argparse
+import os
+
+os.environ["TRANSMORERS_CACHE"] = "1"
+os.environ["RETURN_DICT"] = "False"
 
 parser = argparse.ArgumentParser(description="Evaluate panoramic image generation quality")
 parser.add_argument("--gen_dir", type=str, required=True, help="Path to generated images directory")
