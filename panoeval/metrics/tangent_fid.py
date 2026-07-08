@@ -82,13 +82,14 @@ def average_features_by_view_group(tangent_imgs, group_indices):
     return group_faces.mean(dim=1)  # average over group faces
 
 
-def _mean_cov(feats):
+def _mean_cov(feats, dtype=torch.float64):
     """Mean vector and (unbiased) covariance matrix of a feature set.
 
-    ``feats`` is ``(N, D)``. Computed in float64 to match the numerical
-    behaviour of torchmetrics' FID routine.
+    ``feats`` is ``(N, D)``. The point estimate uses float64 to match the
+    numerical behaviour of torchmetrics' FID; the bootstrap uses float32 for
+    speed (a variance estimate does not need double precision).
     """
-    feats = feats.double()
+    feats = feats.to(dtype)
     n = feats.shape[0]
     mean = feats.mean(dim=0)
     centered = feats - mean
@@ -100,13 +101,37 @@ def _fid_from_stats(mu1, sigma1, mu2, sigma2):
     """Fréchet distance between two Gaussians, equivalent to torchmetrics' FID.
 
     Uses Tr(sqrt(sigma1 @ sigma2)) = sum of sqrt of the eigenvalues of the
-    product, avoiding an explicit matrix square root.
+    product, avoiding an explicit matrix square root. Used for the (few) point
+    estimates, in float64.
     """
     diff = mu1 - mu2
     eigvals = torch.linalg.eigvals(sigma1 @ sigma2)
     tr_covmean = eigvals.sqrt().real.sum()
     fid = diff.dot(diff) + torch.trace(sigma1) + torch.trace(sigma2) - 2 * tr_covmean
     return float(fid.item())
+
+
+def _sym_sqrt(sigma):
+    """Symmetric PSD square root of a covariance matrix via eigendecomposition."""
+    w, v = torch.linalg.eigh(sigma)
+    w = w.clamp_min(0).sqrt()
+    return (v * w) @ v.transpose(-2, -1)
+
+
+def _frechet_sym(mu_r, tr_r, sqrt_r, mu_g, cov_g):
+    """Fréchet distance using the symmetric (fast) form of the sqrt trace.
+
+    Tr(sqrt(Sigma_r @ Sigma_g)) equals the sum of sqrt of the eigenvalues of the
+    *symmetric* matrix sqrt(Sigma_r) @ Sigma_g @ sqrt(Sigma_r), so we can use
+    ``eigvalsh`` (real, GPU-native, ~10x faster than the general ``eigvals``).
+    ``sqrt_r`` and ``tr_r`` are precomputed once from the fixed reference set.
+    Returns a 0-dim tensor kept on-device (avoids a per-call host sync).
+    """
+    m = sqrt_r @ cov_g @ sqrt_r
+    m = 0.5 * (m + m.transpose(-2, -1))
+    eig = torch.linalg.eigvalsh(m).clamp_min(0)
+    diff = mu_r - mu_g
+    return diff.dot(diff) + tr_r + torch.trace(cov_g) - 2 * eig.sqrt().sum()
 
 
 def _extract_view_features(dataloader, extractor, config, view_map, face_size, device, desc):
@@ -249,12 +274,23 @@ def compute_tangentfid(
     if n_bootstrap and n_bootstrap > 0:
         rng = np.random.default_rng(bootstrap_seed)
         n_gen = gen_feats[0].shape[0]
-        gen_dev = [gf.to(device) for gf in gen_feats]  # kept on device for fast indexing
+        gen_dev = [gf.to(device) for gf in gen_feats]  # float32, on device for fast indexing
+        # Precompute the reference statistics ONCE (they are fixed across
+        # resamples): mean, trace, and sqrt(Sigma_r) for the fast symmetric form.
+        real_mu, real_tr, real_sqrt = [], [], []
+        for v in range(K):
+            mu_r, cov_r = _mean_cov(real_feats[v].to(device), dtype=torch.float32)
+            real_mu.append(mu_r)
+            real_tr.append(torch.trace(cov_r))
+            real_sqrt.append(_sym_sqrt(cov_r))
         boot_scores = np.empty((n_bootstrap, K), dtype=np.float64)
         for bi in tqdm(range(n_bootstrap), desc=f"Bootstrap TangentFID [{config_name}]"):
             idx = torch.as_tensor(rng.integers(0, n_gen, size=n_gen), device=device)
+            row = torch.empty(K, device=device)
             for v in range(K):
-                boot_scores[bi, v] = _fid_from_stats(*real_stats[v], *_mean_cov(gen_dev[v][idx]))
+                mu_g, cov_g = _mean_cov(gen_dev[v][idx], dtype=torch.float32)
+                row[v] = _frechet_sym(real_mu[v], real_tr[v], real_sqrt[v], mu_g, cov_g)
+            boot_scores[bi] = row.detach().cpu().numpy()
 
     weight_list = [weights[name] for name in group_names]
     summary = summarize_ci(point_scores, boot_scores, side="upper", weights=weight_list)
