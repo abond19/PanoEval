@@ -164,6 +164,10 @@ class GeneratedDataset(Dataset):
             prompts.append(prompt_path)
 
         # Remove images without captions
+        if idx_to_remove:
+            print(f"[dataloader] Warning: {len(idx_to_remove)}/{len(self.images)} "
+                  f"images had no matching caption under {folder} and were dropped "
+                  f"from CLIP evaluation.")
         for i in sorted(idx_to_remove, reverse=True):
             del self.images[i]
 
