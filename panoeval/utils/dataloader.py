@@ -88,6 +88,36 @@ def find_png_files(directory, use_matterport=True):
     """Backwards-compatible alias for :func:`find_image_files`."""
     return find_image_files(directory, use_matterport)
 
+
+def index_caption_dir(folder):
+    """Scan a prompt directory and map scene identifiers to caption files.
+
+    Handles every layout we have seen:
+        <root>/<dataset>/<scene>/caption.txt   (per-scene folder)
+        <root>/<dataset>/<scene>.txt           (per-scene file)
+        <root>/<name>.txt                       (flat)
+
+    Each caption is registered under a specific ``"dataset/scene"`` key and a
+    bare ``"scene"`` key. The bare key is the fallback for flat generated images
+    whose filename does not encode the dataset; the first writer wins so a
+    specific match is preferred and bare-name collisions stay deterministic.
+    """
+    index = {}
+    for root, _dirs, files in os.walk(folder):
+        for f in files:
+            if not f.lower().endswith('.txt'):
+                continue
+            path = os.path.join(root, f)
+            if os.path.splitext(f)[0].lower() == 'caption':
+                scene = os.path.basename(root)
+                dataset = os.path.basename(os.path.dirname(root))
+            else:
+                scene = os.path.splitext(f)[0]
+                dataset = os.path.basename(root)
+            index[f"{dataset}/{scene}"] = path        # specific key (overwrite ok)
+            index.setdefault(scene, path)             # bare fallback (keep first)
+    return index
+
 def load_images(folder):
     """
     Load all images from a folder.
@@ -141,6 +171,14 @@ class GeneratedDataset(Dataset):
             self.captions = self.load_text_prompts(text_prompts_folder)
 
     def load_text_prompts(self, folder):
+        # Index the caption directory once, then match each image by identity.
+        # This works even when the generated images are a flat folder while the
+        # captions are nested by dataset (or vice versa).
+        index = index_caption_dir(folder)
+        if not index:
+            print(f"[dataloader] Warning: no .txt caption files were found under "
+                  f"{folder}. CLIP evaluation will be empty.")
+
         prompts = []
         idx_to_remove = []
         for i in range(len(self.images)):
@@ -148,16 +186,16 @@ class GeneratedDataset(Dataset):
             stem = os.path.splitext(os.path.basename(img))[0]
             parent = os.path.basename(os.path.dirname(img))
             grandparent = os.path.basename(os.path.dirname(os.path.dirname(img)))
-            # Try both layouts: setup (2) keeps captions under
-            # <folder>/<dataset>/<image>/caption.txt; setup (1) uses a flat
-            # <folder>/<name>.txt (or <name>/caption.txt).
-            candidates = [
-                os.path.join(folder, grandparent, parent, "caption.txt"),
-                os.path.join(folder, parent, "caption.txt"),
-                os.path.join(folder, stem, "caption.txt"),
-                os.path.join(folder, stem + ".txt"),
+            # Most specific identity first (nested images), then bare scene name
+            # (flat images that do not encode the dataset).
+            keys = [
+                f"{grandparent}/{parent}",   # setup (2): dataset/scene
+                f"{grandparent}/{stem}",
+                f"{parent}/{stem}",
+                stem,                        # setup (1): bare scene / GT name
+                parent,
             ]
-            prompt_path = next((c for c in candidates if os.path.exists(c)), None)
+            prompt_path = next((index[k] for k in keys if k in index), None)
             if prompt_path is None:
                 idx_to_remove.append(i)
                 continue
