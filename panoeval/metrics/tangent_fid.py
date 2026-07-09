@@ -244,6 +244,8 @@ def compute_tangentfid(
 
     real_eqr_imgs = RealDataset(real_images, transform=preprocess_images(), use_matterport=use_matterport)
     gen_eqr_imgs = GeneratedDataset(gen_images, transform=preprocess_images(), use_matterport=use_matterport)
+    print(f"[{config_name}] TangentFID loaded {len(real_eqr_imgs)} real / "
+          f"{len(gen_eqr_imgs)} gen images (use_matterport={use_matterport})")
 
     real_dl = torch.utils.data.DataLoader(real_eqr_imgs, batch_size=32, shuffle=False, num_workers=4)
     gen_dl = torch.utils.data.DataLoader(gen_eqr_imgs, batch_size=32, shuffle=False, num_workers=4)

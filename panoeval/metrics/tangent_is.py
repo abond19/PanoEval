@@ -81,22 +81,25 @@ def average_features_by_view_group(tangent_imgs, group_indices):
     return group_faces.mean(dim=1)  # average over group faces
 
 
-def _inception_score(logits, splits):
+def _inception_score(logits, splits, generator=None):
     """Mean Inception Score from a set of Inception logits.
 
-    Replicates torchmetrics' InceptionScore.compute (mean over ``splits``),
-    letting us recompute a view's IS on bootstrap resamples cheaply.
+    Replicates torchmetrics' InceptionScore.compute exactly: an optional random
+    permutation (torchmetrics *always* shuffles before splitting) followed by
+    ``chunk`` into ``splits`` groups and the mean over per-split scores.
+
+    The shuffle is essential for matching the original numbers: without it the
+    splits inherit the dataloader order (grouped by dataset), so each split is
+    homogeneous, its marginal p(y) is less diverse, and IS is biased downward.
     """
+    n = logits.shape[0]
+    if generator is not None:
+        perm = torch.randperm(n, generator=generator, device=logits.device)
+        logits = logits[perm]
     prob = logits.softmax(dim=1)
     log_prob = logits.log_softmax(dim=1)
-    n = prob.shape[0]
-    step = max(n // splits, 1)
     scores = []
-    for k in range(splits):
-        p = prob[k * step:(k + 1) * step]
-        lp = log_prob[k * step:(k + 1) * step]
-        if p.shape[0] == 0:
-            continue
+    for p, lp in zip(prob.chunk(splits, dim=0), log_prob.chunk(splits, dim=0)):
         mean_p = p.mean(dim=0, keepdim=True)
         kl = (p * (lp - mean_p.log())).sum(dim=1)
         scores.append(kl.mean().exp())
@@ -173,6 +176,8 @@ def compute_tangentis(
     K = len(group_names)
 
     gen_eqr_imgs = GeneratedDataset(gen_images, transform=preprocess_images(), use_matterport=use_matterport)
+    print(f"[{config_name}] TangentIS loaded {len(gen_eqr_imgs)} gen images "
+          f"(use_matterport={use_matterport})")
     gen_dl = torch.utils.data.DataLoader(gen_eqr_imgs, batch_size=32, shuffle=False, num_workers=4)
 
     extractor = InceptionScore(feature=feature, splits=splits, normalize=normalize).to(device).inception
@@ -182,9 +187,15 @@ def compute_tangentis(
         gen_dl, extractor, config, view_map, face_size, device, f"TangentIS logits [{config_name}]"
     )
 
+    # torchmetrics shuffles before splitting; replicate that with a seeded
+    # generator so the result is diverse-split (matching the paper) yet
+    # reproducible run-to-run.
+    is_gen = torch.Generator(device=device)
+    is_gen.manual_seed(bootstrap_seed)
+
     # Point estimate: one IS per view from the full generated set.
     point_scores = np.array(
-        [_inception_score(gen_logits[v].to(device), splits) for v in range(K)],
+        [_inception_score(gen_logits[v].to(device), splits, generator=is_gen) for v in range(K)],
         dtype=np.float64,
     )
     for name, score in zip(group_names, point_scores):
@@ -200,7 +211,7 @@ def compute_tangentis(
         for bi in tqdm(range(n_bootstrap), desc=f"Bootstrap TangentIS [{config_name}]"):
             idx = torch.as_tensor(rng.integers(0, n_gen, size=n_gen), device=device)
             for v in range(K):
-                boot_scores[bi, v] = _inception_score(gen_dev[v][idx], splits)
+                boot_scores[bi, v] = _inception_score(gen_dev[v][idx], splits, generator=is_gen)
 
     summary = summarize_ci(point_scores, boot_scores, side="lower")
 
