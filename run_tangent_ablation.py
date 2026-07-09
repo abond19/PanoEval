@@ -64,34 +64,38 @@ def run_model(gen_dir, real_dir, label, configs, args):
             "model": label,
             "config": config_name,
             "num_planes": res["K"],
-            "TangentFID": fid["ci_gaussian"],              # Eq. 5 bound (headline)
-            "TangentFID_mean": fid["mean"],
+            # Paper TangentFID = confidence bound on the polar-weighted per-view scores.
+            "TangentFID": fid["ci_weighted"],
             "TangentFID_weighted_mean": fid.get("weighted_mean"),
+            "TangentFID_mean": fid["mean"],
+            "TangentFID_unweighted_bound": fid["ci_gaussian"],
             "TangentFID_std": fid["std"],
-            "TangentIS": is_["ci_gaussian"],               # Eq. 5 bound (headline)
-            "TangentIS_mean": is_["mean"],
+            # Paper TangentIS = mean per-view IS (the original code's return value).
+            "TangentIS": is_["mean"],
+            "TangentIS_conf_bound": is_["ci_gaussian"],
             "TangentIS_std": is_["std"],
         }
         rows.append(row)
-        print(f"  -> TangentFID (Eq.5)={row['TangentFID']:.3f}  "
-              f"mean={row['TangentFID_mean']:.3f}  wmean={row['TangentFID_weighted_mean']:.3f}  |  "
-              f"TangentIS (Eq.5)={row['TangentIS']:.3f}  mean={row['TangentIS_mean']:.3f}")
+        print(f"  -> TangentFID={row['TangentFID']:.3f} "
+              f"(wmean={row['TangentFID_weighted_mean']:.3f}, mean={row['TangentFID_mean']:.3f})  |  "
+              f"TangentIS={row['TangentIS']:.3f} (conf_bound={row['TangentIS_conf_bound']:.3f})")
     return rows
 
 
 def print_summary(rows):
     header = (f"{'model':<16}{'config':<12}{'K':>4}"
-              f"{'TangentFID':>12}{'FID_mean':>10}{'FID_wmean':>11}"
-              f"{'TangentIS':>12}{'IS_mean':>9}")
+              f"{'TangentFID':>12}{'FID_wmean':>11}{'FID_mean':>10}"
+              f"{'TangentIS':>12}{'IS_bound':>10}")
     print("\n" + "=" * len(header))
-    print("SUMMARY   (TangentFID lower is better | TangentIS higher is better; both = Eq. 5 bound)")
+    print("SUMMARY   (paper: TangentFID = polar-weighted confidence bound; "
+          "TangentIS = mean per-view IS)")
     print("=" * len(header))
     print(header)
     print("-" * len(header))
     for r in rows:
         print(f"{r['model']:<16}{r['config']:<12}{r['num_planes']:>4}"
-              f"{r['TangentFID']:>12.3f}{r['TangentFID_mean']:>10.3f}{r['TangentFID_weighted_mean']:>11.3f}"
-              f"{r['TangentIS']:>12.3f}{r['TangentIS_mean']:>9.3f}")
+              f"{r['TangentFID']:>12.3f}{r['TangentFID_weighted_mean']:>11.3f}{r['TangentFID_mean']:>10.3f}"
+              f"{r['TangentIS']:>12.3f}{r['TangentIS_conf_bound']:>10.3f}")
     print("=" * len(header))
 
 

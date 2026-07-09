@@ -197,4 +197,14 @@ def compute_tangent_metrics(
     weight_list = [weights[g] for g in groups]
     fid_summary = summarize_ci(fid_point, None, side="upper", weights=weight_list)
     is_summary = summarize_ci(is_point, None, side="lower")
+
+    # Reproduce the ORIGINAL paper aggregation EXACTLY. The published TangentFID
+    # is a confidence bound computed on the polar-WEIGHTED per-view scores
+    # (w_i * FID_i), centred on the weighted mean:
+    #     weighted_mean + 1.96 * std(weighted_scores) / sqrt(K)
+    # (std is the population std, matching the original np.sqrt(np.var(...))).
+    weighted_scores = np.asarray(weight_list, dtype=np.float64) * fid_point
+    fid_summary["ci_weighted"] = float(
+        weighted_scores.mean() + 1.96 * weighted_scores.std() / np.sqrt(K)
+    )
     return {"K": K, "fid": fid_summary, "is": is_summary}
