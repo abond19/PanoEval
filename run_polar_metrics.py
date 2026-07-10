@@ -43,6 +43,7 @@ def run_model(gen_dir, real_dir, label, configs, args):
             real_dir=real_dir,
             gen_dir=gen_dir,
             config_name=config_name,
+            mode=args.mode,
             face_size=args.face_size,
             splits=args.splits,
             use_matterport=not args.exclude_matterport,
@@ -68,11 +69,11 @@ def _fmt(v):
     return f"{v:.3f}" if isinstance(v, (int, float)) and v is not None else "   -   "
 
 
-def print_summary(rows):
+def print_summary(rows, mode):
     header = (f"{'model':<16}{'config':<12}"
              f"{'Polar-FID':>11}{'Polar-IS':>10}{'Equat-FID':>11}{'Equat-IS':>10}")
     print("\n" + "=" * len(header))
-    print("POLE-REGION METRICS   (Polar-FID lower is better | Polar-IS higher is better)")
+    print(f"POLE-REGION METRICS [{mode}]   (Polar-FID lower is better | Polar-IS higher is better)")
     print("=" * len(header))
     print(header)
     print("-" * len(header))
@@ -90,6 +91,10 @@ def main():
     p.add_argument("--label", type=str, nargs="+", default=None)
     p.add_argument("--config", "--configs", dest="configs", type=str, default="tangent_18",
                    help="Comma-separated configs (default: tangent_18, the paper setting).")
+    p.add_argument("--mode", choices=["cbound", "pooled"], default="cbound",
+                   help="'cbound' (default): Eq.5 confidence bound over per-view FIDs/ISs in each "
+                        "region (artifact-sensitive, matches TangentFID). 'pooled': single FID/IS "
+                        "over all region crops (dominated by easy content; not recommended).")
     p.add_argument("--real_cache_dir", type=str, default=None)
     p.add_argument("--output", type=str, default="polar_metrics.csv")
     p.add_argument("--face_size", type=int, default=192)
@@ -126,7 +131,7 @@ def main():
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     pd.DataFrame(all_rows).to_csv(args.output, index=False)
-    print_summary(all_rows)
+    print_summary(all_rows, args.mode)
     print(f"\nSaved: {args.output}")
 
 

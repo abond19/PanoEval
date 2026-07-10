@@ -279,21 +279,51 @@ def _load_or_compute_real_polar_stats(real_dir, config, config_name, fid_net, fa
     return stats
 
 
-def compute_polar_metrics(real_dir, gen_dir, config_name="tangent_18", face_size=192, splits=10,
-                          device=None, use_matterport=True, seed=0, real_cache_dir=None,
+def compute_polar_metrics(real_dir, gen_dir, config_name="tangent_18", mode="cbound", face_size=192,
+                          splits=10, device=None, use_matterport=True, seed=0, real_cache_dir=None,
                           batch_size=32, num_workers=8, inception_chunk=512):
     """Pole-region and equatorial FID / IS for one generated set.
 
-    Returns {'config', 'groups': {'Polar': {fid, is, ...}, 'Equatorial': {...}}}.
+    ``mode="cbound"`` (default) reports the Eq. 5 confidence bound over the
+    per-view FIDs/ISs within each region -- variance- and artifact-sensitive, and
+    consistent with TangentFID. ``mode="pooled"`` instead pools all region crops
+    into a single FID/IS; that variant is dominated by easy, uniform sky/ground
+    content and is statistically fragile (pole sample count can fall below the
+    feature dimension), so it is not recommended for pole-artifact evaluation.
+
+    Returns {'config', 'mode', 'groups': {'Polar': {...}, 'Equatorial': {...}}}.
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     config = get_extraction_config(config_name)
     polar_flags = config["polar"]
-    group_idx = {
+    region_idx = {
         "Polar": [i for i, p in enumerate(polar_flags) if p],
         "Equatorial": [i for i, p in enumerate(polar_flags) if not p],
     }
 
+    if mode == "cbound":
+        # Per-view FID/IS (the validated computation), then the Eq. 5 confidence
+        # bound taken separately over the pole-row and equatorial views.
+        res = compute_tangent_metrics(
+            real_dir, gen_dir, config_name, face_size=face_size, splits=splits, device=device,
+            use_matterport=use_matterport, seed=seed, real_cache_dir=real_cache_dir,
+            batch_size=batch_size, num_workers=num_workers, inception_chunk=inception_chunk,
+        )
+        fid_pv = np.asarray(res["fid"]["per_view"], dtype=np.float64)
+        is_pv = np.asarray(res["is"]["per_view"], dtype=np.float64)
+        groups = {}
+        for name, sel in region_idx.items():
+            if not sel:
+                continue
+            fs = summarize_ci(fid_pv[sel], None, side="upper")
+            iss = summarize_ci(is_pv[sel], None, side="lower")
+            groups[name] = {"fid": fs["ci_gaussian"], "is": iss["ci_gaussian"],
+                            "fid_mean": fs["mean"], "is_mean": iss["mean"], "n_views": len(sel)}
+            print(f"[{config_name}] {name} (cbound): FID {fs['ci_gaussian']:.3f} (mean {fs['mean']:.3f})  "
+                  f"IS {iss['ci_gaussian']:.3f} (mean {iss['mean']:.3f})  [{len(sel)} views]")
+        return {"config": config_name, "mode": "cbound", "groups": groups}
+
+    # --- mode == "pooled": one FID/IS over all crops of each region ---
     from torchmetrics.image.fid import FrechetInceptionDistance
     from torchmetrics.image.inception import InceptionScore
     fid_net = FrechetInceptionDistance(feature=2048).to(device).inception
@@ -303,17 +333,17 @@ def compute_polar_metrics(real_dir, gen_dir, config_name="tangent_18", face_size
 
     real_stats = _load_or_compute_real_polar_stats(
         real_dir, config, config_name, fid_net, face_size, device, use_matterport,
-        real_cache_dir, batch_size, num_workers, gpu_extract, inception_chunk, group_idx,
+        real_cache_dir, batch_size, num_workers, gpu_extract, inception_chunk, region_idx,
     )
 
     gen_ds = GeneratedDataset(gen_dir, transform=preprocess_images(), use_matterport=use_matterport)
     print(f"[{config_name}] gen images: {len(gen_ds)} (use_matterport={use_matterport})")
     dl = torch.utils.data.DataLoader(gen_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    stores = {g: _new_pooled_store(device) for g in group_idx}
-    logit_store = {g: [] for g in group_idx}
+    stores = {g: _new_pooled_store(device) for g in region_idx}
+    logit_store = {g: [] for g in region_idx}
     for batch in tqdm(dl, desc=f"gen polar [{config_name}]", total=len(dl)):
         pool, logits = _extract_pool_logits(batch, config, face_size, device, gpu_extract, inception_chunk, fid_net, is_net)
-        for g, idx in group_idx.items():
+        for g, idx in region_idx.items():
             if not idx:
                 continue
             _accum_pooled(stores[g], pool[:, idx].reshape(-1, pool.shape[-1]))
@@ -322,7 +352,7 @@ def compute_polar_metrics(real_dir, gen_dir, config_name="tangent_18", face_size
     is_gen = torch.Generator(device=device)
     is_gen.manual_seed(seed)
     groups = {}
-    for g, idx in group_idx.items():
+    for g, idx in region_idx.items():
         if not idx or stores[g]["n"] < 2 or g not in real_stats:
             continue
         gen_stat = _stats_from_accum(stores[g]["sum"], stores[g]["cov"], stores[g]["n"])
@@ -330,8 +360,8 @@ def compute_polar_metrics(real_dir, gen_dir, config_name="tangent_18", face_size
         gl = torch.cat(logit_store[g], dim=0).to(device)
         is_val = _inception_score(gl, splits, generator=is_gen)
         groups[g] = {"fid": fid, "is": is_val, "n_views": len(idx), "n_samples": stores[g]["n"]}
-        print(f"[{config_name}] {g}: FID {fid:.3f}  IS {is_val:.3f}  ({len(idx)} views/img)")
-    return {"config": config_name, "groups": groups}
+        print(f"[{config_name}] {g} (pooled): FID {fid:.3f}  IS {is_val:.3f}  ({len(idx)} views/img)")
+    return {"config": config_name, "mode": "pooled", "groups": groups}
 
 
 # ---------------------------------------------------------------------------
@@ -387,16 +417,28 @@ def _load_or_compute_real_patch_stats(real_dir, tf, patch_feats, config_name, pa
     return stats, store["n"]
 
 
+def _crop_lat_band(imgs, lat_band):
+    """Keep the central ``lat_band`` fraction of ERP rows (latitude band)."""
+    if lat_band >= 1.0:
+        return imgs
+    H = imgs.shape[2]
+    keep = max(1, int(round(H * lat_band)))
+    top = (H - keep) // 2
+    return imgs[:, :, top:top + keep, :]
+
+
 def compute_patch_fid(real_dir, gen_dir, patch_size=512, target_hw=(2048, 4096),
-                      config_name=None, splits=10, device=None, use_matterport=True,
+                      config_name=None, lat_band=1.0, splits=10, device=None, use_matterport=True,
                       seed=0, real_cache_dir=None, batch_size=4, num_workers=4, inception_chunk=256):
     """Native-resolution patch FID / IS between a generated set and a reference.
 
     ``config_name=None`` tiles the (resized-to-``target_hw``) ERP into raw
     ``patch_size`` patches; ``config_name="tangent_4k"`` instead extracts dense
-    narrow-FOV gnomonic crops. Returns a dict with ``patch_fid`` / ``patch_is``.
-    Intended for evaluating high-resolution output against a high-resolution
-    reference (no per-view aggregation, no baseline downsampling).
+    narrow-FOV gnomonic crops. ``lat_band<1.0`` restricts the raw-ERP tiling to
+    the central latitude fraction (e.g. 0.5 = middle +/-45deg), excluding the
+    heavily ERP-distorted pole rows. Returns a dict with ``patch_fid`` /
+    ``patch_is``. Intended for evaluating high-resolution output against a
+    high-resolution reference (no per-view aggregation, no baseline downsampling).
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     config = get_extraction_config(config_name) if config_name else None
@@ -411,7 +453,8 @@ def compute_patch_fid(real_dir, gen_dir, patch_size=512, target_hw=(2048, 4096),
 
     def patch_feats(batch, want_logits):
         if config is None:
-            u8 = (_erp_patches(batch.to(device), patch_size) * 255.0).to(torch.uint8)
+            imgs = _crop_lat_band(batch.to(device), lat_band)
+            u8 = (_erp_patches(imgs, patch_size) * 255.0).to(torch.uint8)
             pool = _chunked_forward(fid_net, u8, inception_chunk)
             logits = _chunked_forward(is_net, u8, inception_chunk) if want_logits else None
             return pool, logits
@@ -421,8 +464,9 @@ def compute_patch_fid(real_dir, gen_dir, patch_size=512, target_hw=(2048, 4096),
         logits = logits_bt.reshape(-1, logits_bt.shape[-1]) if (want_logits and logits_bt is not None) else None
         return pool, logits
 
+    cache_tag = f"{config_name or 'erp'}_lb{lat_band}"
     real_stats, real_n = _load_or_compute_real_patch_stats(
-        real_dir, tf, patch_feats, config_name, patch_size, target_hw, device,
+        real_dir, tf, patch_feats, cache_tag, patch_size, target_hw, device,
         use_matterport, real_cache_dir, batch_size, num_workers)
 
     gen_ds = GeneratedDataset(gen_dir, transform=tf, use_matterport=use_matterport)

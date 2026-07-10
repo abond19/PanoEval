@@ -46,6 +46,9 @@ def main():
     p.add_argument("--patch_size", type=int, default=512, help="Patch size in pixels (default 512).")
     p.add_argument("--config", type=str, default=None,
                    help="None = raw ERP tiles (default); 'tangent_4k' = narrow-FOV gnomonic crops.")
+    p.add_argument("--lat_band", type=float, default=1.0,
+                   help="Central latitude fraction to keep for raw-ERP tiling (e.g. 0.5 = middle "
+                        "+/-45deg, excluding distorted pole rows). Ignored for tangent_4k. Default 1.0.")
     p.add_argument("--real_cache_dir", type=str, default=None)
     p.add_argument("--output", type=str, default="patch_fid.csv")
     p.add_argument("--splits", type=int, default=10)
@@ -76,6 +79,7 @@ def main():
         res = compute_patch_fid(
             real_dir=args.real_dir, gen_dir=gen_dir,
             patch_size=args.patch_size, target_hw=target_hw, config_name=args.config,
+            lat_band=args.lat_band,
             splits=args.splits, use_matterport=not args.exclude_matterport, seed=args.seed,
             real_cache_dir=args.real_cache_dir, batch_size=args.batch_size,
             num_workers=args.num_workers, inception_chunk=args.inception_chunk,
