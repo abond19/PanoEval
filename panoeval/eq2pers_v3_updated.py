@@ -60,6 +60,28 @@ def _build_grid(num_cols, phi_centers):
     return combos, polar
 
 
+def _build_dense_grid(fov, lat_max=78.0, overlap=0.75):
+    """Tile the sphere with narrow-FOV planes for high-resolution evaluation.
+
+    Rows are spaced by ``fov*overlap`` in latitude; each row has enough columns
+    to tile 360 degrees at that latitude (fewer near the poles). At small FOV
+    each plane maps to few native ERP pixels, so a high-resolution panorama is
+    captured without downsampling (unlike the fixed-80-degree ablation configs).
+    """
+    step = fov * overlap
+    n_rows = max(2, int(round(2 * lat_max / step)) + 1)
+    phi_centers = [(-lat_max + i * (2 * lat_max) / (n_rows - 1)) for i in range(n_rows)]
+    combos, polar = [], []
+    for i, phi in enumerate(phi_centers):
+        circ = max(math.cos(math.radians(phi)), 1e-3)
+        n_cols = max(1, int(round(360.0 * circ / (fov * overlap))))
+        theta_interval = 360.0 / n_cols
+        for j in range(n_cols):
+            combos.append([j * theta_interval + theta_interval / 2, phi])
+            polar.append(i == 0 or i == n_rows - 1)
+    return combos, polar
+
+
 def get_extraction_config(name):
     """Resolve a configuration name to a fully-specified extraction config.
 
@@ -81,10 +103,22 @@ def get_extraction_config(name):
             "fov": (90, 90),
             "num_planes": len(combos),
         }
+    if name == "tangent_4k":
+        # Narrow FOV so each crop maps to few native ERP pixels -> preserves
+        # high-resolution (4K) detail. Densely tiles the sphere (~100+ planes).
+        fov = 24.0
+        combos, polar = _build_dense_grid(fov)
+        return {
+            "name": name,
+            "combos": combos,
+            "polar": polar,
+            "fov": (fov, fov),
+            "num_planes": len(combos),
+        }
     if name not in _GRID_SPECS:
         raise ValueError(
             f"Unknown extraction config '{name}'. "
-            f"Available: {list(_GRID_SPECS.keys()) + ['cubemap']}"
+            f"Available: {list(_GRID_SPECS.keys()) + ['cubemap', 'tangent_4k']}"
         )
     num_cols, phi_centers = _GRID_SPECS[name]
     combos, polar = _build_grid(num_cols, phi_centers)

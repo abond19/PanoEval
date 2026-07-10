@@ -332,3 +332,116 @@ def compute_polar_metrics(real_dir, gen_dir, config_name="tangent_18", face_size
         groups[g] = {"fid": fid, "is": is_val, "n_views": len(idx), "n_samples": stores[g]["n"]}
         print(f"[{config_name}] {g}: FID {fid:.3f}  IS {is_val:.3f}  ({len(idx)} views/img)")
     return {"config": config_name, "groups": groups}
+
+
+# ---------------------------------------------------------------------------
+# Native-resolution patch FID / IS (for evaluating high-resolution / 4K output).
+#
+# Each panorama is loaded at a high target resolution and split into
+# native-resolution patches (raw ERP tiles, or gnomonic narrow-FOV crops via the
+# "tangent_4k" config). All patches are pooled into one FID (gen vs real) and one
+# IS (gen). Because patches are kept near native resolution, this is sensitive to
+# fine 4K detail that a whole-image FID (which resizes to 299) discards.
+# ---------------------------------------------------------------------------
+
+def _highres_transform(target_hw):
+    from torchvision import transforms
+    return transforms.Compose([transforms.Resize(target_hw), transforms.ToTensor()])
+
+
+def _erp_patches(imgs, patch_size):
+    """Split (b, C, H, W) into non-overlapping (b*nh*nw, C, patch, patch) tiles."""
+    b, c, H, W = imgs.shape
+    nh, nw = H // patch_size, W // patch_size
+    if nh < 1 or nw < 1:
+        raise ValueError(f"patch_size {patch_size} exceeds image {H}x{W}")
+    imgs = imgs[:, :, :nh * patch_size, :nw * patch_size]
+    t = imgs.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
+    return t.permute(0, 2, 3, 1, 4, 5).reshape(b * nh * nw, c, patch_size, patch_size)
+
+
+def _load_or_compute_real_patch_stats(real_dir, tf, patch_feats, config_name, patch_size, target_hw,
+                                      device, use_matterport, cache_dir, batch_size, num_workers):
+    cache_path = None
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        key = (f"{os.path.basename(real_dir.rstrip('/'))}_{config_name or 'erp'}_ps{patch_size}_"
+               f"{target_hw[0]}x{target_hw[1]}_mp{int(use_matterport)}")
+        cache_path = os.path.join(cache_dir, f"realpatch_{key}.pt")
+        if os.path.exists(cache_path):
+            print(f"[patch] loading cached real patch stats: {cache_path}")
+            d = torch.load(cache_path, map_location=device)
+            return (d["mean"].to(device), d["cov"].to(device)), int(d["n"])
+
+    real_ds = RealDataset(real_dir, transform=tf, use_matterport=use_matterport)
+    print(f"[patch] real images: {len(real_ds)} (computing patch stats; use_matterport={use_matterport})")
+    dl = torch.utils.data.DataLoader(real_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    store = _new_pooled_store(device)
+    for batch in tqdm(dl, desc="real patches", total=len(dl)):
+        pool, _ = patch_feats(batch, False)
+        _accum_pooled(store, pool)
+    stats = _stats_from_accum(store["sum"], store["cov"], store["n"])
+    if cache_path:
+        torch.save({"mean": stats[0].cpu(), "cov": stats[1].cpu(), "n": store["n"]}, cache_path)
+        print(f"[patch] cached real patch stats -> {cache_path}")
+    return stats, store["n"]
+
+
+def compute_patch_fid(real_dir, gen_dir, patch_size=512, target_hw=(2048, 4096),
+                      config_name=None, splits=10, device=None, use_matterport=True,
+                      seed=0, real_cache_dir=None, batch_size=4, num_workers=4, inception_chunk=256):
+    """Native-resolution patch FID / IS between a generated set and a reference.
+
+    ``config_name=None`` tiles the (resized-to-``target_hw``) ERP into raw
+    ``patch_size`` patches; ``config_name="tangent_4k"`` instead extracts dense
+    narrow-FOV gnomonic crops. Returns a dict with ``patch_fid`` / ``patch_is``.
+    Intended for evaluating high-resolution output against a high-resolution
+    reference (no per-view aggregation, no baseline downsampling).
+    """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    config = get_extraction_config(config_name) if config_name else None
+    gpu_extract = _probe_gpu_extraction(config, device) if config is not None else False
+
+    from torchmetrics.image.fid import FrechetInceptionDistance
+    from torchmetrics.image.inception import InceptionScore
+    fid_net = FrechetInceptionDistance(feature=2048).to(device).inception
+    is_net = InceptionScore(feature="logits_unbiased", splits=splits, normalize=False).to(device).inception
+
+    tf = _highres_transform(target_hw)
+
+    def patch_feats(batch, want_logits):
+        if config is None:
+            u8 = (_erp_patches(batch.to(device), patch_size) * 255.0).to(torch.uint8)
+            pool = _chunked_forward(fid_net, u8, inception_chunk)
+            logits = _chunked_forward(is_net, u8, inception_chunk) if want_logits else None
+            return pool, logits
+        pool_bt, logits_bt = _extract_pool_logits(batch, config, patch_size, device, gpu_extract,
+                                                  inception_chunk, fid_net, is_net if want_logits else None)
+        pool = pool_bt.reshape(-1, pool_bt.shape[-1])
+        logits = logits_bt.reshape(-1, logits_bt.shape[-1]) if (want_logits and logits_bt is not None) else None
+        return pool, logits
+
+    real_stats, real_n = _load_or_compute_real_patch_stats(
+        real_dir, tf, patch_feats, config_name, patch_size, target_hw, device,
+        use_matterport, real_cache_dir, batch_size, num_workers)
+
+    gen_ds = GeneratedDataset(gen_dir, transform=tf, use_matterport=use_matterport)
+    print(f"[patch] gen images: {len(gen_ds)} -> {patch_size}px patches @ target {target_hw} "
+          f"(mode={config_name or 'erp'})")
+    dl = torch.utils.data.DataLoader(gen_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    store = _new_pooled_store(device)
+    logit_store = []
+    for batch in tqdm(dl, desc="gen patches", total=len(dl)):
+        pool, logits = patch_feats(batch, True)
+        _accum_pooled(store, pool)
+        logit_store.append(logits.detach().cpu())
+    gen_stat = _stats_from_accum(store["sum"], store["cov"], store["n"])
+    fid = _fid_from_stats(*real_stats, *gen_stat)
+    is_gen = torch.Generator(device=device)
+    is_gen.manual_seed(seed)
+    is_val = _inception_score(torch.cat(logit_store, dim=0).to(device), splits, generator=is_gen)
+    print(f"[patch] patch-FID {fid:.3f}  patch-IS {is_val:.3f}  "
+          f"(gen {store['n']} / real {real_n} patches)")
+    return {"patch_fid": fid, "patch_is": is_val, "n_gen_patches": store["n"],
+            "n_real_patches": real_n, "patch_size": patch_size,
+            "target_hw": list(target_hw), "config": config_name or "erp"}
