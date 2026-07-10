@@ -427,9 +427,25 @@ def _crop_lat_band(imgs, lat_band):
     return imgs[:, :, top:top + keep, :]
 
 
+def _degrade_updown(imgs, factor):
+    """Round-trip through 1/factor resolution and back (bicubic).
+
+    Simulates "generated at lower resolution, then upsampled": the content is
+    preserved but high-frequency detail beyond 1/factor resolution is lost.
+    """
+    if not factor or factor <= 1:
+        return imgs
+    import torch.nn.functional as F
+    H, W = imgs.shape[2], imgs.shape[3]
+    small = F.interpolate(imgs, size=(max(1, H // factor), max(1, W // factor)),
+                          mode="bicubic", align_corners=False)
+    return F.interpolate(small, size=(H, W), mode="bicubic", align_corners=False).clamp_(0, 1)
+
+
 def compute_patch_fid(real_dir, gen_dir, patch_size=512, target_hw=(2048, 4096),
-                      config_name=None, lat_band=1.0, splits=10, device=None, use_matterport=True,
-                      seed=0, real_cache_dir=None, batch_size=4, num_workers=4, inception_chunk=256):
+                      config_name=None, lat_band=1.0, degrade_factor=None, splits=10, device=None,
+                      use_matterport=True, seed=0, real_cache_dir=None, batch_size=4, num_workers=4,
+                      inception_chunk=256):
     """Native-resolution patch FID / IS between a generated set and a reference.
 
     ``config_name=None`` tiles the (resized-to-``target_hw``) ERP into raw
@@ -470,12 +486,15 @@ def compute_patch_fid(real_dir, gen_dir, patch_size=512, target_hw=(2048, 4096),
         use_matterport, real_cache_dir, batch_size, num_workers)
 
     gen_ds = GeneratedDataset(gen_dir, transform=tf, use_matterport=use_matterport)
+    deg = f", degraded 1/{degrade_factor}x round-trip" if degrade_factor else ""
     print(f"[patch] gen images: {len(gen_ds)} -> {patch_size}px patches @ target {target_hw} "
-          f"(mode={config_name or 'erp'})")
+          f"(mode={config_name or 'erp'}{deg})")
     dl = torch.utils.data.DataLoader(gen_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     store = _new_pooled_store(device)
     logit_store = []
     for batch in tqdm(dl, desc="gen patches", total=len(dl)):
+        if degrade_factor:
+            batch = _degrade_updown(batch.to(device), degrade_factor)
         pool, logits = patch_feats(batch, True)
         _accum_pooled(store, pool)
         logit_store.append(logits.detach().cpu())
@@ -488,4 +507,5 @@ def compute_patch_fid(real_dir, gen_dir, patch_size=512, target_hw=(2048, 4096),
           f"(gen {store['n']} / real {real_n} patches)")
     return {"patch_fid": fid, "patch_is": is_val, "n_gen_patches": store["n"],
             "n_real_patches": real_n, "patch_size": patch_size,
-            "target_hw": list(target_hw), "config": config_name or "erp"}
+            "target_hw": list(target_hw), "config": config_name or "erp",
+            "degrade_factor": degrade_factor}

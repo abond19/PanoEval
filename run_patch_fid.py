@@ -49,6 +49,12 @@ def main():
     p.add_argument("--lat_band", type=float, default=1.0,
                    help="Central latitude fraction to keep for raw-ERP tiling (e.g. 0.5 = middle "
                         "+/-45deg, excluding distorted pole rows). Ignored for tangent_4k. Default 1.0.")
+    p.add_argument("--compare_upsampled", action="store_true",
+                   help="Also evaluate a downsample->upsample control per model (genuine 4K vs the "
+                        "same images round-tripped through 1/factor resolution). If genuine < control, "
+                        "the high-resolution stage adds real detail beyond interpolation.")
+    p.add_argument("--degrade_factor", type=int, default=2,
+                   help="Round-trip factor for --compare_upsampled (2 = via 2K). Default 2.")
     p.add_argument("--real_cache_dir", type=str, default=None)
     p.add_argument("--output", type=str, default="patch_fid.csv")
     p.add_argument("--splits", type=int, default=10)
@@ -68,25 +74,37 @@ def main():
     else:
         labels = [os.path.basename(d.rstrip("/")) or d for d in gen_dirs]
 
+    # (row label suffix, degrade_factor) variants to run per model
+    def _k(w):
+        return f"{round(w / 1024)}K" if w % 1024 == 0 else f"{w}px"
+
+    variants = [("", None)]
+    if args.compare_upsampled:
+        suffix = f" ({_k(target_hw[1] // args.degrade_factor)}↑{_k(target_hw[1])})"
+        variants.append((suffix, args.degrade_factor))
+
     rows = []
     for gen_dir, label in zip(gen_dirs, labels):
         if not os.path.exists(gen_dir):
             print(f"Warning: {gen_dir} does not exist. Skipping.")
             continue
-        print("=" * 70)
-        print(f"[{label}] patch-FID  (mode={args.config or 'erp'}, {args.patch_size}px @ {target_hw})")
-        print("=" * 70)
-        res = compute_patch_fid(
-            real_dir=args.real_dir, gen_dir=gen_dir,
-            patch_size=args.patch_size, target_hw=target_hw, config_name=args.config,
-            lat_band=args.lat_band,
-            splits=args.splits, use_matterport=not args.exclude_matterport, seed=args.seed,
-            real_cache_dir=args.real_cache_dir, batch_size=args.batch_size,
-            num_workers=args.num_workers, inception_chunk=args.inception_chunk,
-        )
-        rows.append({"model": label, "mode": res["config"], "patch_size": res["patch_size"],
-                     "target_hw": args.target_hw, "patch_FID": res["patch_fid"],
-                     "patch_IS": res["patch_is"], "n_gen_patches": res["n_gen_patches"]})
+        for suffix, degrade in variants:
+            run_label = label + suffix
+            print("=" * 70)
+            print(f"[{run_label}] patch-FID  (mode={args.config or 'erp'}, {args.patch_size}px @ {target_hw})")
+            print("=" * 70)
+            res = compute_patch_fid(
+                real_dir=args.real_dir, gen_dir=gen_dir,
+                patch_size=args.patch_size, target_hw=target_hw, config_name=args.config,
+                lat_band=args.lat_band, degrade_factor=degrade,
+                splits=args.splits, use_matterport=not args.exclude_matterport, seed=args.seed,
+                real_cache_dir=args.real_cache_dir, batch_size=args.batch_size,
+                num_workers=args.num_workers, inception_chunk=args.inception_chunk,
+            )
+            rows.append({"model": run_label, "mode": res["config"], "patch_size": res["patch_size"],
+                         "target_hw": args.target_hw, "degrade_factor": degrade or "",
+                         "patch_FID": res["patch_fid"], "patch_IS": res["patch_is"],
+                         "n_gen_patches": res["n_gen_patches"]})
 
     if not rows:
         print("No results computed.")
